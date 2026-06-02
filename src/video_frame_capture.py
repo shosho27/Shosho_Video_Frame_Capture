@@ -118,6 +118,7 @@ class VideoFrameCapture(QMainWindow):
         self.fps            = 30
         self.output_folder  = None
         self._playing       = False
+        self._has_alpha     = False
         self._flash_timer   = QTimer()
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._clear_flash)
@@ -396,10 +397,14 @@ class VideoFrameCapture(QMainWindow):
         for f in self.video_files:
             info = self._probe_video(os.path.join(folder, f))
             self.video_info[f] = info
-            dur  = f"{info['duration']:.1f}s" if info['duration'] else "?"
-            res  = f"{info['width']}×{info['height']}" if info['width'] else ""
-            item = QListWidgetItem(f"{f}\n  {res}  {dur}  {info['fps']:.0f}fps" if res else f)
-            item.setToolTip(f"{f}\n{res}  {dur}  {info['fps']:.1f}fps")
+            dur   = f"{info['duration']:.1f}s" if info['duration'] else "?"
+            res   = f"{info['width']}×{info['height']}" if info['width'] else ""
+            alpha = "  α" if info.get("has_alpha") else ""
+            label = f"{f}\n  {res}  {dur}  {info['fps']:.0f}fps{alpha}" if res else f
+            item  = QListWidgetItem(label)
+            item.setToolTip(
+                f"{f}\n{res}  {dur}  {info['fps']:.1f}fps"
+                + ("\n⚠ Has alpha channel" if info.get("has_alpha") else ""))
             self.file_list.addItem(item)
 
         self.status_label.setText(
@@ -412,8 +417,14 @@ class VideoFrameCapture(QMainWindow):
         fps = cap.get(cv2.CAP_PROP_FPS) or 0
         fc  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         dur = fc / fps if fps else 0
+        # Read one frame to check actual channel count — the only reliable way
+        has_alpha = False
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.ndim == 3:
+            has_alpha = frame.shape[2] == 4
         cap.release()
-        return {"width": w, "height": h, "fps": fps, "duration": dur, "frames": fc}
+        return {"width": w, "height": h, "fps": fps, "duration": dur,
+                "frames": fc, "has_alpha": has_alpha}
 
     def on_video_selected(self, row):
         if row < 0 or row >= len(self.video_files):
@@ -444,9 +455,17 @@ class VideoFrameCapture(QMainWindow):
         self.btn_play.setEnabled(True)
 
         dur = self.total_frames / self.fps
+
+        # Detect alpha by reading first frame
+        ret, test = self.current_cap.read()
+        self._has_alpha = bool(ret and test is not None
+                               and test.ndim == 3 and test.shape[2] == 4)
+        self.current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+        alpha_tag = "  ·  α ALPHA" if self._has_alpha else ""
         self.info_bar.setText(
             f"{os.path.basename(path)}  ·  {w}×{h}  ·  "
-            f"{self.fps:.2f} fps  ·  {self.total_frames} frames  ·  {dur:.2f}s")
+            f"{self.fps:.2f} fps  ·  {self.total_frames} frames  ·  {dur:.2f}s{alpha_tag}")
 
         self.show_frame(0)
         self.status_label.setText(f"Loaded: {os.path.basename(path)}")
@@ -460,9 +479,14 @@ class VideoFrameCapture(QMainWindow):
         if not ret:
             return
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        qt_img  = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
+        h, w = frame.shape[:2]
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            # BGRA — preserve alpha in preview (shown over dark background)
+            rgba   = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
+            qt_img = QImage(rgba.data, w, h, 4 * w, QImage.Format_RGBA8888)
+        else:
+            rgb    = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            qt_img = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         pixmap  = QPixmap.fromImage(qt_img)
         scaled  = pixmap.scaled(self.preview_label.size(),
                                 Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -549,18 +573,34 @@ class VideoFrameCapture(QMainWindow):
         self.quality_val_label.setVisible(is_jpeg)
 
     def _save_frame(self, frame, out_path_no_ext):
-        fmt = self.fmt_combo.currentText()
+        fmt       = self.fmt_combo.currentText()
+        has_alpha = frame.ndim == 3 and frame.shape[2] == 4
+
         if fmt == "PNG":
+            # PNG supports alpha — save BGRA directly
             path = out_path_no_ext + ".png"
             cv2.imwrite(path, frame)
-        elif fmt == "JPEG":
-            quality = self.quality_slider.value()
-            path = out_path_no_ext + ".jpg"
-            cv2.imwrite(path, frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
         elif fmt == "TIFF":
+            # TIFF supports alpha — save BGRA directly
             path = out_path_no_ext + ".tif"
             cv2.imwrite(path, frame)
+        elif fmt == "JPEG":
+            # JPEG has no alpha — composite onto white before saving
+            quality = self.quality_slider.value()
+            path    = out_path_no_ext + ".jpg"
+            save_frame = self._composite_on_white(frame) if has_alpha else frame
+            cv2.imwrite(path, save_frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
         return path
+
+    @staticmethod
+    def _composite_on_white(bgra):
+        """Flatten BGRA onto a white background — used for JPEG export."""
+        import numpy as np
+        b, g, r, a = cv2.split(bgra)
+        alpha = a.astype(np.float32) / 255.0
+        def blend(ch):
+            return (ch * alpha + 255 * (1.0 - alpha)).clip(0, 255).astype(np.uint8)
+        return cv2.merge([blend(b), blend(g), blend(r)])
 
     # ── Timecode list (batch) ─────────────────────────────────────────────────
 
