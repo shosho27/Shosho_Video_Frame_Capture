@@ -20,10 +20,7 @@ pyinstaller "Shosho Video Frame Capture.spec" --noconfirm
 codesign --deep --force --sign - "dist/Shosho Video Frame Capture.app"
 ```
 
-Recipients need to strip quarantine once after copying:
-```bash
-xattr -cr "/path/to/Shosho Video Frame Capture.app"
-```
+Recipients just double-click the app — it automatically removes the quarantine flag on first run, so no manual `xattr` step is needed.
 
 ### Full signing + notarization (Apple Developer Program — $99/year)
 

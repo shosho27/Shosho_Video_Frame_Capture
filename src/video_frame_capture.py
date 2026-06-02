@@ -19,6 +19,7 @@ Requirements:
 
 import sys
 import os
+import subprocess
 import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -100,6 +101,17 @@ QProgressBar::chunk { background-color: #2a6ada; border-radius: 3px; }
 QLabel { color: #dcdcf0; }
 QFrame[frameShape="4"] { color: #555570; }
 """
+
+
+def _remove_quarantine_attr():
+    if sys.platform != "darwin":
+        return
+    try:
+        app_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        subprocess.run(["xattr", "-d", "com.apple.quarantine", app_path],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 class VideoFrameCapture(QMainWindow):
@@ -764,6 +776,7 @@ class VideoFrameCapture(QMainWindow):
 
 
 if __name__ == "__main__":
+    _remove_quarantine_attr()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLESHEET)
