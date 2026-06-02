@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
     QStyle, QSizePolicy, QDoubleSpinBox
 )
 from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg')
 
@@ -43,6 +43,10 @@ class VideoFrameCapture(QMainWindow):
         self.total_frames = 0
         self.fps = 30
         self.output_folder = None
+        self._playing = False
+
+        self._play_timer = QTimer()
+        self._play_timer.timeout.connect(self._advance_frame)
 
         self.init_ui()
 
@@ -92,12 +96,20 @@ class VideoFrameCapture(QMainWindow):
         scrubber_layout.addWidget(self.frame_slider)
         right_panel.addLayout(scrubber_layout)
 
-        # Time / frame info
+        # Time / frame info + play button
         info_layout = QHBoxLayout()
         self.time_label = QLabel("00:00.000 / 00:00.000")
         self.time_label.setStyleSheet("font-family: monospace; font-size: 13px;")
         info_layout.addWidget(self.time_label)
         info_layout.addStretch()
+
+        self.btn_play = QPushButton("▶  Play")
+        self.btn_play.setFixedWidth(90)
+        self.btn_play.setEnabled(False)
+        self.btn_play.setToolTip("Play / Pause  (Space)")
+        self.btn_play.clicked.connect(self.toggle_play)
+        info_layout.addWidget(self.btn_play)
+
         self.frame_label = QLabel("Frame: 0 / 0")
         self.frame_label.setStyleSheet("font-family: monospace; font-size: 13px;")
         info_layout.addWidget(self.frame_label)
@@ -266,6 +278,8 @@ class VideoFrameCapture(QMainWindow):
         self.frame_slider.setValue(0)
         self.jump_spin.setMaximum(self.total_frames / self.fps)
         self.btn_use_timecode.setEnabled(True)
+        self.btn_play.setEnabled(True)
+        self._stop_playback()
 
         self.show_frame(0)
         self.status_label.setText(f"Loaded: {os.path.basename(path)} | {self.total_frames} frames | {self.fps:.1f} fps | {self.total_frames/self.fps:.1f}s")
@@ -331,6 +345,44 @@ class VideoFrameCapture(QMainWindow):
         sec = self.frame_slider.value() / self.fps
         self.batch_spin.setValue(round(sec, 2))
         self.status_label.setText(f"Batch timecode set to {sec:.2f}s")
+
+    # ---- PLAYBACK ----
+
+    def toggle_play(self):
+        if self._playing:
+            self._stop_playback()
+        else:
+            self._start_playback()
+
+    def _start_playback(self):
+        if not self.current_cap:
+            return
+        self._playing = True
+        self.btn_play.setText("⏸  Pause")
+        interval = max(1, int(1000 / self.fps))
+        self._play_timer.start(interval)
+
+    def _stop_playback(self):
+        self._playing = False
+        self._play_timer.stop()
+        self.btn_play.setText("▶  Play")
+
+    def _advance_frame(self):
+        current = self.frame_slider.value()
+        if current >= self.total_frames - 1:
+            self._stop_playback()
+            return
+        # Block slider signal to avoid double-render, then update
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(current + 1)
+        self.frame_slider.blockSignals(False)
+        self.show_frame(current + 1)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Space:
+            self.toggle_play()
+        else:
+            super().keyPressEvent(event)
 
     # ---- CAPTURE ----
 
@@ -432,6 +484,7 @@ class VideoFrameCapture(QMainWindow):
             self.show_frame(self.frame_slider.value())
 
     def closeEvent(self, event):
+        self._stop_playback()
         if self.current_cap:
             self.current_cap.release()
         event.accept()

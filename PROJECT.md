@@ -13,7 +13,7 @@ should push the current frame's timecode directly into the batch spin box.
 Biggest friction point in the current workflow.
 
 ### Play / pause button
-**Status:** To do  
+**Status:** Done  
 Add a play button that advances frames in real time using a QTimer at the video's
 native FPS. Spacebar shortcut to toggle. Lets you watch the video roll instead of
 only scrubbing manually.
