@@ -180,6 +180,11 @@ class VideoFrameCapture(QMainWindow):
         self.batch_spin.setSingleStep(0.5)
         self.batch_spin.setValue(0)
         batch_time_layout.addWidget(self.batch_spin)
+        self.btn_use_timecode = QPushButton("← Use Current Frame")
+        self.btn_use_timecode.setToolTip("Set batch timecode to the frame currently shown in the preview")
+        self.btn_use_timecode.setEnabled(False)
+        self.btn_use_timecode.clicked.connect(self.use_current_timecode)
+        batch_time_layout.addWidget(self.btn_use_timecode)
         batch_layout.addLayout(batch_time_layout)
 
         self.btn_batch = QPushButton("⚡  Batch Capture All Videos")
@@ -260,6 +265,7 @@ class VideoFrameCapture(QMainWindow):
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
         self.frame_slider.setValue(0)
         self.jump_spin.setMaximum(self.total_frames / self.fps)
+        self.btn_use_timecode.setEnabled(True)
 
         self.show_frame(0)
         self.status_label.setText(f"Loaded: {os.path.basename(path)} | {self.total_frames} frames | {self.fps:.1f} fps | {self.total_frames/self.fps:.1f}s")
@@ -318,6 +324,13 @@ class VideoFrameCapture(QMainWindow):
         frame = int(sec * self.fps)
         frame = max(0, min(frame, self.total_frames - 1))
         self.frame_slider.setValue(frame)
+
+    def use_current_timecode(self):
+        if not self.current_cap:
+            return
+        sec = self.frame_slider.value() / self.fps
+        self.batch_spin.setValue(round(sec, 2))
+        self.status_label.setText(f"Batch timecode set to {sec:.2f}s")
 
     # ---- CAPTURE ----
 

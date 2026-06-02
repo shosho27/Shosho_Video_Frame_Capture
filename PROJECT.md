@@ -7,7 +7,7 @@ Planned improvements organized by priority.
 ## High priority
 
 ### Use current frame position for batch
-**Status:** To do  
+**Status:** Done  
 When you find a good frame in Single mode, clicking a "Use This Timecode" button
 should push the current frame's timecode directly into the batch spin box.
 Biggest friction point in the current workflow.
