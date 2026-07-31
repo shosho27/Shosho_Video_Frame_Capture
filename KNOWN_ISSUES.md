@@ -1,10 +1,11 @@
 # Known Issues and Limitations
 
-## Batch runs on the main thread
+## All batch modes run on the main thread
 
-Batch capture calls `QApplication.processEvents()` each iteration to keep the
-UI responsive, but it still blocks the main thread. On large folders this can
-make the window sluggish. A proper fix would move batch processing to a QThread.
+Batch, Interval, and Scene capture all call `QApplication.processEvents()` each
+iteration to keep the UI responsive, but they still block the main thread. On
+large folders this can make the window sluggish. A proper fix would move
+processing to a QThread.
 
 ## HAP video not supported
 
@@ -18,11 +19,18 @@ Use ffmpeg-based extraction for HAP content.
 frame rate (VFR) video or certain compressed formats. The extracted frame
 may be slightly before or after the requested position.
 
-## Output folder is fixed
+## Scene detection requires FFmpeg
 
-Captured frames always go to a `captured_frames/` subfolder inside the
-selected video folder. There is no option to choose a different output location.
-This is a planned improvement (see PROJECT.md).
+The Scene Capture mode shells out to FFmpeg for cut detection. If FFmpeg is
+not in PATH or the common Homebrew locations, a warning dialog is shown and
+no frames are captured. Install via `brew install ffmpeg`.
+
+## Scene detection is threshold-sensitive
+
+The FFmpeg `scene` filter compares frame histograms. A threshold of 0.40
+(default) works well for most broadcast footage but may miss subtle cuts in
+low-contrast video or over-trigger on flash frames. Adjust the Sensitivity
+slider if results are unexpected.
 
 ## Apple Silicon only
 

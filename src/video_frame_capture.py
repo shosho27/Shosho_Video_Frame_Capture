@@ -19,6 +19,8 @@ Requirements:
 
 import sys
 import os
+import re
+import shutil
 import subprocess
 import cv2
 from PyQt5.QtWidgets import (
@@ -101,6 +103,43 @@ QProgressBar::chunk { background-color: #2a6ada; border-radius: 3px; }
 QLabel { color: #dcdcf0; }
 QFrame[frameShape="4"] { color: #555570; }
 """
+
+
+def _find_ffmpeg():
+    # Bundled static binary via imageio-ffmpeg (works frozen and unfrozen)
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+    # PATH and common Homebrew locations
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _detect_scene_cuts(video_path, threshold=0.4):
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        return None
+    cmd = [
+        ffmpeg, "-i", video_path,
+        "-vf", f"select='gt(scene,{threshold})',showinfo",
+        "-f", "null", "-",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    timestamps = set()
+    for line in result.stderr.splitlines():
+        m = re.search(r"pts_time:([\d.]+)", line)
+        if m:
+            timestamps.add(float(m.group(1)))
+    return sorted(timestamps)
 
 
 def _remove_quarantine_attr():
@@ -355,6 +394,77 @@ class VideoFrameCapture(QMainWindow):
         capture_row.addWidget(batch_grp)
 
         right_panel.addLayout(capture_row)
+
+        # ── SECOND CAPTURE ROW: Interval + Scene ──────────────────────────────
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        right_panel.addWidget(sep2)
+
+        capture_row2 = QHBoxLayout()
+
+        # Interval Capture
+        interval_grp = QGroupBox("Interval Capture")
+        interval_lay = QVBoxLayout()
+        interval_lay.setSpacing(4)
+        ivl_top = QHBoxLayout()
+        ivl_top.addWidget(QLabel("Every:"))
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setMinimum(0.1)
+        self.interval_spin.setMaximum(3600)
+        self.interval_spin.setValue(3.0)
+        self.interval_spin.setSingleStep(0.5)
+        self.interval_spin.setSuffix(" sec")
+        self.interval_spin.setFixedWidth(90)
+        ivl_top.addWidget(self.interval_spin)
+        ivl_top.addStretch()
+        interval_lay.addLayout(ivl_top)
+        btn_ivl_single = QPushButton("⏱  This Video")
+        btn_ivl_single.setMinimumHeight(34)
+        btn_ivl_single.clicked.connect(self.capture_interval_single)
+        interval_lay.addWidget(btn_ivl_single)
+        btn_ivl_batch = QPushButton("⏱  All Videos")
+        btn_ivl_batch.setMinimumHeight(34)
+        btn_ivl_batch.setStyleSheet(
+            "background-color: #1a3d6e; color: white; font-weight: bold; "
+            "border-radius: 5px; border: none;")
+        btn_ivl_batch.clicked.connect(self.capture_interval_batch)
+        interval_lay.addWidget(btn_ivl_batch)
+        interval_grp.setLayout(interval_lay)
+        capture_row2.addWidget(interval_grp)
+
+        # Scene Capture
+        scene_grp = QGroupBox("Scene Capture")
+        scene_lay = QVBoxLayout()
+        scene_lay.setSpacing(4)
+        thresh_row = QHBoxLayout()
+        thresh_row.addWidget(QLabel("Sensitivity:"))
+        self.scene_threshold_slider = QSlider(Qt.Horizontal)
+        self.scene_threshold_slider.setMinimum(10)
+        self.scene_threshold_slider.setMaximum(90)
+        self.scene_threshold_slider.setValue(40)
+        self.scene_threshold_slider.valueChanged.connect(
+            lambda v: self.scene_thresh_label.setText(f"{v / 100:.2f}"))
+        thresh_row.addWidget(self.scene_threshold_slider)
+        self.scene_thresh_label = QLabel("0.40")
+        self.scene_thresh_label.setFixedWidth(34)
+        thresh_row.addWidget(self.scene_thresh_label)
+        scene_lay.addLayout(thresh_row)
+        btn_scene_single = QPushButton("🎬  This Video")
+        btn_scene_single.setMinimumHeight(34)
+        btn_scene_single.clicked.connect(self.capture_scenes_single)
+        scene_lay.addWidget(btn_scene_single)
+        btn_scene_batch = QPushButton("🎬  All Videos")
+        btn_scene_batch.setMinimumHeight(34)
+        btn_scene_batch.setStyleSheet(
+            "background-color: #1a3d6e; color: white; font-weight: bold; "
+            "border-radius: 5px; border: none;")
+        btn_scene_batch.clicked.connect(self.capture_scenes_batch)
+        scene_lay.addWidget(btn_scene_batch)
+        scene_grp.setLayout(scene_lay)
+        capture_row2.addWidget(scene_grp)
+
+        right_panel.addLayout(capture_row2)
 
         # Progress + status
         self.progress = QProgressBar()
@@ -730,6 +840,158 @@ class VideoFrameCapture(QMainWindow):
             msg += f"\n\n⚠️ Errors ({len(errors)}):\n" + "\n".join(errors[:10])
         self.status_label.setText(msg.split("\n")[0])
         QMessageBox.information(self, "Batch Complete", msg)
+
+    # ── Interval capture ──────────────────────────────────────────────────────
+
+    def capture_interval_single(self):
+        if not self.current_cap or not self.current_video_path:
+            self.status_label.setText("No video loaded.")
+            return
+        self._run_interval_capture([self.current_video_path])
+
+    def capture_interval_batch(self):
+        if not self.video_folder or not self.video_files:
+            QMessageBox.warning(self, "No Videos",
+                                "Please select a folder with videos first.")
+            return
+        self._run_interval_capture(
+            [os.path.join(self.video_folder, f) for f in self.video_files])
+
+    def _run_interval_capture(self, paths):
+        interval = self.interval_spin.value()
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        # Fast metadata pass to size the progress bar
+        total_ops = 0
+        for path in paths:
+            cap = cv2.VideoCapture(path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            dur = total_f / fps if fps else 0
+            total_ops += int(dur / interval) + 1
+            cap.release()
+
+        self.progress.setVisible(True)
+        self.progress.setMaximum(max(1, total_ops))
+        self.progress.setValue(0)
+
+        success, errors, op = 0, [], 0
+        for path in paths:
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                errors.append(f"{os.path.basename(path)}: could not open")
+                continue
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            dur = total_f / fps
+            stem = os.path.splitext(os.path.basename(path))[0]
+            t = 0.0
+            while t <= dur + 0.001:
+                frame_num = min(int(round(t * fps)), total_f - 1)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                op += 1
+                if ret:
+                    base = os.path.join(self.output_folder, f"{stem}_{t:.1f}s")
+                    self._save_frame(frame, base)
+                    success += 1
+                else:
+                    errors.append(f"{os.path.basename(path)} @ {t:.1f}s")
+                self.progress.setValue(op)
+                QApplication.processEvents()
+                t += interval
+            cap.release()
+
+        self.progress.setVisible(False)
+        msg = f"✅  Captured {success} frames from {len(paths)} video(s)"
+        if errors:
+            msg += f"\n\n⚠️ Errors ({len(errors)}):\n" + "\n".join(errors[:10])
+        self.status_label.setText(msg.split("\n")[0])
+        if len(paths) > 1 or errors:
+            QMessageBox.information(self, "Interval Capture Complete", msg)
+
+    # ── Scene capture ─────────────────────────────────────────────────────────
+
+    def capture_scenes_single(self):
+        if not self.current_cap or not self.current_video_path:
+            self.status_label.setText("No video loaded.")
+            return
+        self._run_scene_capture([self.current_video_path])
+
+    def capture_scenes_batch(self):
+        if not self.video_folder or not self.video_files:
+            QMessageBox.warning(self, "No Videos",
+                                "Please select a folder with videos first.")
+            return
+        self._run_scene_capture(
+            [os.path.join(self.video_folder, f) for f in self.video_files])
+
+    def _run_scene_capture(self, paths):
+        if not _find_ffmpeg():
+            QMessageBox.warning(self, "FFmpeg Not Found",
+                                "Scene detection requires FFmpeg.\n"
+                                "Install via: brew install ffmpeg")
+            return
+        threshold = self.scene_threshold_slider.value() / 100.0
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        self.progress.setVisible(True)
+        self.progress.setMaximum(len(paths))
+        self.progress.setValue(0)
+
+        success, errors = 0, []
+        for i, path in enumerate(paths):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            self.status_label.setText(f"Scanning scenes: {os.path.basename(path)}…")
+            QApplication.processEvents()
+
+            cuts = _detect_scene_cuts(path, threshold)
+            if cuts is None:
+                errors.append(f"{os.path.basename(path)}: ffmpeg error")
+                self.progress.setValue(i + 1)
+                continue
+
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                errors.append(f"{os.path.basename(path)}: could not open")
+                self.progress.setValue(i + 1)
+                continue
+
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            dur = total_f / fps
+
+            boundaries = sorted({0.0} | set(cuts) | {dur})
+            scenes = [
+                (boundaries[j], boundaries[j + 1])
+                for j in range(len(boundaries) - 1)
+                if boundaries[j + 1] - boundaries[j] > 0.1
+            ]
+
+            for idx, (start, end) in enumerate(scenes):
+                midpoint = start + (end - start) / 2
+                frame_num = min(int(round(midpoint * fps)), total_f - 1)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                ret, frame = cap.read()
+                if ret:
+                    base = os.path.join(
+                        self.output_folder,
+                        f"{stem}_scene{idx + 1:03d}_{start:.2f}s")
+                    self._save_frame(frame, base)
+                    success += 1
+                else:
+                    errors.append(f"{os.path.basename(path)} scene {idx + 1}")
+
+            cap.release()
+            self.progress.setValue(i + 1)
+            QApplication.processEvents()
+
+        self.progress.setVisible(False)
+        msg = f"✅  Captured {success} scene frame(s) from {len(paths)} video(s)"
+        if errors:
+            msg += f"\n\n⚠️ Errors ({len(errors)}):\n" + "\n".join(errors[:10])
+        self.status_label.setText(msg.split("\n")[0])
+        QMessageBox.information(self, "Scene Capture Complete", msg)
 
     # ── Drag and drop ─────────────────────────────────────────────────────────
 

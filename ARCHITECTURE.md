@@ -17,12 +17,43 @@ The preview re-renders on every slider move and on window resize.
 ## Frame extraction
 
 **Single capture:** reads the current slider frame number directly from the
-already-open `cv2.VideoCapture`, writes PNG via `cv2.imwrite`.
+already-open `cv2.VideoCapture`, writes to the chosen format via `_save_frame`.
 
 **Batch capture:** opens a fresh `cv2.VideoCapture` per video, seeks to
-`target_sec * fps`, reads one frame, writes PNG, releases. Runs synchronously
-on the main thread with `QApplication.processEvents()` called each iteration
-to keep the progress bar updating.
+`target_sec * fps`, reads one frame, writes to output, releases. Runs
+synchronously on the main thread with `QApplication.processEvents()` called
+each iteration to keep the progress bar updating.
+
+**Interval capture:** for each path in the list, steps through `t = 0.0` to
+`duration` in `interval`-second increments, seeking to `round(t * fps)` each
+step. Does a fast metadata-only probe pass first to size the progress bar.
+
+**Scene capture:** calls module-level `_detect_scene_cuts(path, threshold)`
+which shells out to FFmpeg's `select='gt(scene,N)'` filter and parses
+`pts_time:` values from stderr. The resulting cut timestamps are merged with
+`{0.0, duration}` to form scene boundaries; slivers under 100 ms are dropped.
+For each scene the midpoint frame is captured. Requires FFmpeg in PATH;
+shows a warning dialog if not found.
+
+## Scene detection helpers (module-level)
+
+`_find_ffmpeg()` — resolves ffmpeg from PATH then common Homebrew locations;
+returns `None` if not found.
+
+`_detect_scene_cuts(path, threshold)` — shells out to FFmpeg, parses stderr
+for `pts_time:` tokens, returns sorted list of cut timestamps. Returns `None`
+if ffmpeg is unavailable.
+
+## Output naming
+
+- Single:   `{stem}_frame{N}_{sec:.2f}s.{ext}`
+- Batch:    `{stem}_{target_sec:.2f}s.{ext}`
+- Interval: `{stem}_{t:.1f}s.{ext}`
+- Scene:    `{stem}_scene{N:03d}_{start:.2f}s.{ext}`
+
+Output format is PNG / JPEG / TIFF, chosen via the Format combo. JPEG exposes
+a quality slider. Alpha-channel video is composited onto white for JPEG, preserved
+for PNG and TIFF.
 
 ## Timecode sync (Use Current Frame)
 
@@ -30,10 +61,7 @@ to keep the progress bar updating.
 and sets `batch_spin.setValue()`. No signal juggling needed — both widgets are
 on the main thread.
 
-## Output naming
+## Output folder
 
-- Single: `{video_stem}_frame{N}_{sec:.2f}s.png`
-- Batch:  `{video_stem}_{target_sec:.2f}s.png`
-
-All output goes to a `captured_frames/` subfolder inside the selected video folder,
-created automatically on folder selection.
+Defaults to `captured_frames/` inside the selected video folder, created
+automatically. User can override via the Output Folder button at any time.
