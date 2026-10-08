@@ -19,6 +19,12 @@ Use ffmpeg-based extraction for HAP content.
 frame rate (VFR) video or certain compressed formats. The extracted frame
 may be slightly before or after the requested position.
 
+Since 2026-10-08 batch capture only seeks when that is cheaper than reading
+forward (`_read_frames`); a frame reached by reading forward is always exact.
+On the files tested (DJI HEVC, ProRes) both ways gave byte-identical frames,
+but on a VFR file the forward-read frames may now differ from older runs —
+by being correct. Interval capture on a 126s HEVC clip went 46s -> 23s at 1s.
+
 ## Scene detection requires FFmpeg
 
 The Scene Capture mode shells out to FFmpeg for cut detection. If FFmpeg is

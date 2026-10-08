@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -103,6 +104,44 @@ QProgressBar::chunk { background-color: #2a6ada; border-radius: 3px; }
 QLabel { color: #dcdcf0; }
 QFrame[frameShape="4"] { color: #555570; }
 """
+
+
+def _read_frames(cap, frame_numbers):
+    """Yield (frame_number, ok, frame) for frame numbers in ascending order.
+
+    Jumping with CAP_PROP_POS_FRAMES makes the decoder start again from the
+    previous keyframe, so on long-GOP camera files (HEVC/H.264) a 1s interval
+    paid for most of a GOP on every frame. Reading forward is cheaper when the
+    next frame is close. Which is cheaper depends on the file, so both costs
+    are measured as we go and each step takes the cheaper one. The frames are
+    identical either way. Measured on a 126s DJI HEVC clip: 0.5s interval
+    107s -> 24s, 1s 46s -> 23s; at 5s it still seeks, as before.
+    """
+    seek_cost = grab_cost = None
+    pos = None                       # the frame the next read() returns
+    for n in frame_numbers:
+        gap = None if pos is None else n - pos
+        if (gap is not None and gap >= 0
+                and (seek_cost is None or grab_cost is None
+                     or gap * grab_cost < seek_cost)):
+            started = time.perf_counter()
+            ok = True
+            for _ in range(gap):
+                if not cap.grab():
+                    ok = False
+                    break
+            if gap and ok:
+                per = (time.perf_counter() - started) / gap
+                grab_cost = per if grab_cost is None else 0.8 * grab_cost + 0.2 * per
+            ok, frame = cap.read() if ok else (False, None)
+        else:
+            started = time.perf_counter()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, n)
+            ok, frame = cap.read()
+            took = time.perf_counter() - started
+            seek_cost = took if seek_cost is None else 0.8 * seek_cost + 0.2 * took
+        pos = n + 1
+        yield n, ok, frame
 
 
 def _find_ffmpeg():
@@ -885,11 +924,12 @@ class VideoFrameCapture(QMainWindow):
             total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             dur = total_f / fps
             stem = os.path.splitext(os.path.basename(path))[0]
-            t = 0.0
+            times, t = [], 0.0
             while t <= dur + 0.001:
-                frame_num = min(int(round(t * fps)), total_f - 1)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                ret, frame = cap.read()
+                times.append(t)
+                t += interval
+            frame_nums = [min(int(round(t * fps)), total_f - 1) for t in times]
+            for t, (_n, ret, frame) in zip(times, _read_frames(cap, frame_nums)):
                 op += 1
                 if ret:
                     base = os.path.join(self.output_folder, f"{stem}_{t:.1f}s")
@@ -899,7 +939,6 @@ class VideoFrameCapture(QMainWindow):
                     errors.append(f"{os.path.basename(path)} @ {t:.1f}s")
                 self.progress.setValue(op)
                 QApplication.processEvents()
-                t += interval
             cap.release()
 
         self.progress.setVisible(False)
@@ -968,11 +1007,10 @@ class VideoFrameCapture(QMainWindow):
                 if boundaries[j + 1] - boundaries[j] > 0.1
             ]
 
-            for idx, (start, end) in enumerate(scenes):
-                midpoint = start + (end - start) / 2
-                frame_num = min(int(round(midpoint * fps)), total_f - 1)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                ret, frame = cap.read()
+            frame_nums = [min(int(round((start + (end - start) / 2) * fps)), total_f - 1)
+                          for start, end in scenes]
+            for idx, ((start, end), (_n, ret, frame)) in enumerate(
+                    zip(scenes, _read_frames(cap, frame_nums))):
                 if ret:
                     base = os.path.join(
                         self.output_folder,
