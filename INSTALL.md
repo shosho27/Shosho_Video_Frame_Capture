@@ -3,7 +3,7 @@
 ## Requirements
 - Mac with Apple Silicon (M1, M2, M3, or M4)
 - macOS 12 or later
-- **FFmpeg** — required for Scene Capture (install once via `brew install ffmpeg`)
+- FFmpeg, the downloader, and the YouTube runtime are included in the standalone app.
 
 ---
 
@@ -14,6 +14,25 @@ Simply **double-click** `Shosho Video Frame Capture.app` to launch it. If macOS 
 ---
 
 ## Using the app
+
+### Download from YouTube, X, Facebook, or Instagram
+1. Click **Download Video from Link**.
+2. Paste an individual video, post, or Reel link.
+3. Choose a download folder and quality, then click **Download**.
+4. The completed video opens in frame capture automatically.
+
+MKV downloads automatically convert to MP4 first. The original MKV is kept.
+If conversion fails, the app loads the original and shows a message in the
+download window. Conversion can be cancelled without losing the original.
+
+For videos that require sign-in, choose the browser where you can watch the video
+under **Use sign-in from**, then retry. This reads that browser's cookies only when
+you start the download. Public downloads use **None** by default. Some videos can
+remain unavailable because of site restrictions or changes.
+
+The standalone app includes all download and conversion dependencies. For source
+installations, install `requirements.txt` (which includes FFmpeg) and Deno or
+Node.js. See README.md for downloader updates.
 
 ### Single capture
 1. Click **Select Video Folder** (or drag a folder onto the window)
@@ -50,4 +69,5 @@ Confirm your Mac has Apple Silicon (Apple menu → About This Mac → look for "
 This build does not run on Intel Macs.
 
 **Scene Capture shows "FFmpeg Not Found" warning**
-Install FFmpeg: `brew install ffmpeg` — then try again.
+The standalone app includes FFmpeg. Reinstall the app if its bundled files are
+missing. For a source installation, reinstall `requirements.txt`.

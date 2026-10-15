@@ -1,50 +1,28 @@
-# Building and Distributing Shosho Video Frame Capture
+# Building Shosho Video Frame Capture
 
-## Build the .app
-
-```bash
-pip install pyinstaller
-cd /path/to/Shosho_Video_Frame_Capture
-
-pyinstaller "Shosho Video Frame Capture.spec" --noconfirm
-# Output: dist/Shosho Video Frame Capture.app
-```
-
----
-
-## Sign the app
-
-### Ad-hoc signing (free, no Apple Developer account)
+Build on an Apple Silicon Mac:
 
 ```bash
-codesign --deep --force --sign - "dist/Shosho Video Frame Capture.app"
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt pyinstaller
+# Deno is required on the build machine; it is included in the finished app.
+brew install deno
+.venv/bin/python build_app.py
 ```
 
-Recipients just double-click the app — it automatically removes the quarantine flag on first run, so no manual `xattr` step is needed.
+The output is `dist/Shosho Video Frame Capture.app`. Double-click to launch.
+The build includes Python, PyQt5, OpenCV, yt-dlp, its JavaScript solver, Deno,
+and FFmpeg from the imageio-ffmpeg wheel. Users do not need Python, Homebrew,
+or a separate FFmpeg installation. FFmpeg is shared by scene detection,
+audio/video merging, and MKV-to-MP4 conversion.
 
-### Full signing + notarization (Apple Developer Program — $99/year)
+The downloader runs as a subprocess of the bundled app. Deno and its dynamic
+library dependencies are collected into the app by PyInstaller. The build script
+ad-hoc signs the app and verifies its signature. This is a local build, not an
+Apple-notarized distribution; downloads of shared builds may require macOS
+approval. Public distribution can use a Developer ID signature and notarization.
 
-Enroll at **developer.apple.com/programs/enroll**
-
-```bash
-codesign --deep --force \
-  --sign "Developer ID Application: Your Name (TEAMID)" \
-  --options runtime \
-  "dist/Shosho Video Frame Capture.app"
-
-xcrun notarytool submit "dist/Shosho Video Frame Capture.app" \
-  --apple-id you@email.com \
-  --team-id TEAMID \
-  --password APP_SPECIFIC_PASSWORD \
-  --wait
-
-xcrun stapler staple "dist/Shosho Video Frame Capture.app"
-```
-
----
-
-## Distribution notes
-
-- Current build is **arm64 (Apple Silicon) only**
-- The `dist/` folder is excluded from git — do not commit built apps
-- Always re-sign after every rebuild
+Do not commit `dist/`, `build/`, or generated `.spec` files. Keep the build script
+and requirements in version control. Update dependencies and rebuild when a
+video site changes. Third-party component information is included in
+`THIRD_PARTY_NOTICES.md` inside the bundle.
