@@ -1,4 +1,4 @@
-# Installing Shosho Video Frame Capture
+# Installing Video Frame Capture
 
 ## Requirements
 - Mac with Apple Silicon (M1, M2, M3, or M4)
@@ -9,7 +9,7 @@
 
 ## Installation
 
-Simply **double-click** `Shosho Video Frame Capture.app` to launch it. If macOS asks "Are you sure?" on first run, click **Open**. That's it.
+Simply **double-click** `Video Frame Capture.app` to launch it. If macOS asks "Are you sure?" on first run, click **Open**. That's it.
 
 ---
 

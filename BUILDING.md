@@ -1,4 +1,4 @@
-# Building and Distributing Shosho Video Frame Capture
+# Building and Distributing Video Frame Capture
 
 ## Build the .app
 
@@ -6,8 +6,8 @@
 pip install pyinstaller
 cd /path/to/Shosho_Video_Frame_Capture
 
-pyinstaller "Shosho Video Frame Capture.spec" --noconfirm
-# Output: dist/Shosho Video Frame Capture.app
+pyinstaller "Video Frame Capture.spec" --noconfirm
+# Output: dist/Video Frame Capture.app
 ```
 
 ---
@@ -17,7 +17,7 @@ pyinstaller "Shosho Video Frame Capture.spec" --noconfirm
 ### Ad-hoc signing (free, no Apple Developer account)
 
 ```bash
-codesign --deep --force --sign - "dist/Shosho Video Frame Capture.app"
+codesign --deep --force --sign - "dist/Video Frame Capture.app"
 ```
 
 Recipients just double-click the app — it automatically removes the quarantine flag on first run, so no manual `xattr` step is needed.
@@ -30,15 +30,15 @@ Enroll at **developer.apple.com/programs/enroll**
 codesign --deep --force \
   --sign "Developer ID Application: Your Name (TEAMID)" \
   --options runtime \
-  "dist/Shosho Video Frame Capture.app"
+  "dist/Video Frame Capture.app"
 
-xcrun notarytool submit "dist/Shosho Video Frame Capture.app" \
+xcrun notarytool submit "dist/Video Frame Capture.app" \
   --apple-id you@email.com \
   --team-id TEAMID \
   --password APP_SPECIFIC_PASSWORD \
   --wait
 
-xcrun stapler staple "dist/Shosho Video Frame Capture.app"
+xcrun stapler staple "dist/Video Frame Capture.app"
 ```
 
 ---

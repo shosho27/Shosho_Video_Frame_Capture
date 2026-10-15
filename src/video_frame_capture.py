@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Shosho Video Frame Capture
-==========================
+Video Frame Capture
+===================
 Extract still frames from video files.
 
 - Single Mode: Preview a video, scrub to the right frame, capture it.
 - Batch Mode: Set one or more timecodes, extract from every video in a folder.
+- Contact Sheet: Batch timecode frames, or a folder of stills, on one PDF.
 
 Keyboard shortcuts:
   Space           Play / Pause
@@ -17,6 +18,7 @@ Requirements:
     pip install PyQt5 opencv-python
 """
 
+import math
 import sys
 import os
 import re
@@ -24,17 +26,585 @@ import shutil
 import subprocess
 import time
 import cv2
+import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFileDialog, QGroupBox,
     QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QFrame,
-    QSizePolicy, QDoubleSpinBox, QComboBox, QShortcut,
+    QSizePolicy, QDoubleSpinBox, QComboBox, QShortcut, QSpinBox, QDialog,
 )
-from PyQt5.QtGui import QImage, QPixmap, QFont, QKeySequence, QColor, QPalette
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import (
+    QImage, QPixmap, QFont, QKeySequence, QColor, QPalette,
+    QPainter, QPdfWriter, QPageSize, QPen, QFontMetrics,
+)
+from PyQt5.QtCore import Qt, QTimer, QSizeF, QRectF, QMarginsF
+
+APP_NAME = "Video Frame Capture"
 
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv',
                     '.webm', '.m4v', '.mpg', '.mpeg')
+CONTACT_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
+# Width, height in PDF points (1/72 inch), portrait.
+PAPER_SIZES_PT = {
+    "Letter": (612.0, 792.0),
+    "Legal": (612.0, 1008.0),
+    "Tabloid": (792.0, 1224.0),
+    "A4": (595.28, 841.89),
+    "A3": (841.89, 1190.55),
+}
+
+
+def page_points(name, landscape):
+    """Return (width, height) in points for a named paper size."""
+    width, height = PAPER_SIZES_PT[name]
+    if landscape:
+        return height, width
+    return width, height
+
+
+def contact_grid(per_page, page_w, page_h):
+    """Choose columns and rows for `per_page` cells on a page of this size.
+
+    A perfect rectangle is preferred, and the cell stays close to square so
+    the picture and its two caption lines both fit.
+    """
+    per_page = max(1, int(per_page))
+    best = None
+    for cols in range(1, per_page + 1):
+        rows = math.ceil(per_page / cols)
+        aspect = (page_w / cols) / (page_h / rows)
+        waste = cols * rows - per_page
+        score = (abs(aspect - 1.0) + waste * 0.15, cols)
+        if best is None or score < best[0]:
+            best = (score, cols, rows)
+    return best[1], best[2]
+
+
+def list_contact_images(folder):
+    """Image files in one folder, sorted by file name. Subfolders are skipped."""
+    if not folder or not os.path.isdir(folder):
+        return []
+    found = []
+    for name in os.listdir(folder):
+        if os.path.splitext(name)[1].lower() not in CONTACT_IMAGE_EXTENSIONS:
+            continue
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            found.append(path)
+    found.sort(key=lambda path: os.path.basename(path).casefold())
+    return found
+
+
+def contact_page_slices(paths, per_page):
+    per_page = max(1, int(per_page))
+    return [paths[i:i + per_page] for i in range(0, len(paths), per_page)]
+
+
+# Print resolution for the preview and the PDF. 72 dpi made a full-page cell
+# only a few hundred pixels wide, so the pictures looked soft.
+CONTACT_SHEET_DPI = 300
+
+
+def contact_seek_frame(seconds, fps, frame_count):
+    """Frame index for a batch timecode.
+
+    Returns -1 when the time is past a known end, so a short movie is skipped
+    instead of showing its last frame. Returns None when the duration is
+    unknown and the caller should seek by time.
+    """
+    if not fps or fps <= 0 or not frame_count or frame_count <= 0:
+        return None
+    last = int(frame_count) - 1
+    index = int(float(seconds) * float(fps))
+    if index > last:
+        return -1
+    return max(0, index)
+
+
+class ContactFrame:
+    """One cell: a picture plus the file name and folder printed under it."""
+
+    def __init__(self, name, directory, path=None, image=None):
+        self.name = name
+        self.directory = directory
+        self.path = path
+        self.image = image
+
+    def picture(self):
+        if self.image is not None and not self.image.isNull():
+            return self.image
+        if self.path:
+            return QImage(self.path)
+        return QImage()
+
+
+def page_device_pixels(page_w, page_h, dpi=CONTACT_SHEET_DPI):
+    """Page size in pixels at `dpi`. `page_w` and `page_h` are in points."""
+    scale = dpi / 72.0
+    return page_w * scale, page_h * scale
+
+
+def _set_image_dpi(image, dpi):
+    dots_per_meter = int(round(dpi / 0.0254))
+    image.setDotsPerMeterX(dots_per_meter)
+    image.setDotsPerMeterY(dots_per_meter)
+
+
+def numpy_frame_to_qimage(frame, max_edge=None):
+    """BGR or BGRA frame from OpenCV. Kept full size unless `max_edge` is set."""
+    if frame is None or getattr(frame, "size", 0) == 0:
+        return QImage()
+    if frame.ndim == 2:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+    elif frame.shape[2] == 4:
+        blue, green, red, alpha = cv2.split(frame)
+        cover = alpha.astype(np.float32) / 255.0
+
+        def blend(channel):
+            mixed = channel.astype(np.float32) * cover + 255.0 * (1.0 - cover)
+            return mixed.clip(0, 255).astype(np.uint8)
+
+        rgb = cv2.merge([blend(red), blend(green), blend(blue)])
+    else:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    height, width = rgb.shape[:2]
+    longest = max(height, width)
+    if max_edge and longest > max_edge:
+        scale = max_edge / float(longest)
+        rgb = cv2.resize(
+            rgb,
+            (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    rgb = np.ascontiguousarray(rgb)
+    height, width = rgb.shape[:2]
+    image = QImage(rgb.data, width, height, int(rgb.strides[0]), QImage.Format_RGB888)
+    return image.copy()
+
+
+def load_contact_still(path, max_edge=None):
+    """Remember one saved picture. The original file is read when the page is drawn."""
+    del max_edge
+    return ContactFrame(os.path.basename(path), os.path.dirname(path), path=path)
+
+
+def _contact_picture(item):
+    """Return (image, file name, directory) for a path or a ContactFrame."""
+    if isinstance(item, ContactFrame):
+        return item.picture(), item.name, item.directory
+    return QImage(item), os.path.basename(item), os.path.dirname(item)
+
+
+def _contact_extra(skipped, errors):
+    parts = []
+    if skipped:
+        parts.append(f"{len(skipped)} skipped, shorter than the batch time")
+    if errors:
+        parts.append(f"{len(errors)} could not be read")
+    return " · ".join(parts)
+
+
+def _contact_detail(skipped, errors):
+    lines = list(skipped) + list(errors)
+    if not lines:
+        return ""
+    shown = "\n".join(lines[:8])
+    if len(lines) > 8:
+        shown += f"\n… and {len(lines) - 8} more"
+    return shown
+
+
+def _empty_frame_folder_message(folder):
+    message = "That folder has no PNG, JPEG, or TIFF files."
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return message
+    if any(os.path.isdir(os.path.join(folder, name)) for name in names):
+        message += (
+            "\n\nPictures inside subfolders are not included. "
+            "Open the folder that holds the files."
+        )
+    return message
+
+
+def _contain_size(src_w, src_h, box_w, box_h):
+    """Size of `src` fitted inside `box`, keeping the aspect ratio."""
+    if src_w <= 0 or src_h <= 0 or box_w <= 0 or box_h <= 0:
+        return max(1.0, box_w), max(1.0, box_h)
+    scale = min(box_w / float(src_w), box_h / float(src_h))
+    return src_w * scale, src_h * scale
+
+
+def _elide(font, text, width, painter=None):
+    device = painter.device() if painter is not None else None
+    metrics = QFontMetrics(font, device) if device is not None else QFontMetrics(font)
+    return metrics.elidedText(text, Qt.ElideMiddle, max(1, int(width)))
+
+
+def paint_contact_page(painter, page_w, page_h, paths, per_page, page_label="", dpi=CONTACT_SHEET_DPI):
+    """Draw one contact page. `per_page` sets the grid even when this page is short.
+
+    `page_w` and `page_h` are device pixels. `dpi` turns the point layout
+    (margins, type) into that pixel grid so the pictures stay sharp.
+    """
+    scale = dpi / 72.0
+    painter.fillRect(QRectF(0, 0, page_w, page_h), QColor("white"))
+    margin = 24.0 * scale
+    footer = 16.0 * scale
+    gap = 8.0 * scale
+    inner_w = page_w - margin * 2
+    inner_h = page_h - margin - (margin + footer)
+    cols, rows = contact_grid(per_page, inner_w, inner_h)
+    cell_w = (inner_w - gap * (cols - 1)) / cols
+    cell_h = (inner_h - gap * (rows - 1)) / rows
+    caption_h = min(30.0 * scale, max(14.0 * scale, cell_h * 0.30))
+    name_font = QFont()
+    name_font.setPointSizeF(max(5.0, min(8.5, (cell_w / scale) / 26)))
+    name_font.setBold(True)
+    dir_font = QFont()
+    dir_font.setPointSizeF(max(4.5, name_font.pointSizeF() - 1.0))
+
+    for index, path in enumerate(paths):
+        col = index % cols
+        row = index // cols
+        x = margin + col * (cell_w + gap)
+        y = margin + row * (cell_h + gap)
+        image_rect = QRectF(x, y, cell_w, max(1.0, cell_h - caption_h))
+        painter.setPen(QPen(QColor("#d0d0d0"), max(1.0, scale)))
+        painter.drawRect(image_rect)
+        image, name, directory = _contact_picture(path)
+        if image.isNull():
+            painter.setPen(QColor("#888"))
+            painter.drawText(image_rect, Qt.AlignCenter, "Unreadable")
+        else:
+            # Draw the original into the cell. QPdfWriter stores that image
+            # and scales it on the page, so the PDF keeps the source pixels
+            # instead of a copy shrunk to the cell.
+            fitted_w, fitted_h = _contain_size(
+                image.width(), image.height(), image_rect.width(), image_rect.height())
+            dx = image_rect.x() + (image_rect.width() - fitted_w) / 2.0
+            dy = image_rect.bottom() - fitted_h
+            painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            painter.drawImage(QRectF(dx, dy, fitted_w, fitted_h), image)
+        name_rect = QRectF(x, y + cell_h - caption_h + 1, cell_w, caption_h / 2)
+        dir_rect = QRectF(x, name_rect.bottom(), cell_w, caption_h / 2)
+        painter.setFont(name_font)
+        painter.setPen(QColor("#222"))
+        painter.drawText(name_rect, Qt.AlignLeft | Qt.AlignVCenter, _elide(name_font, name, cell_w, painter))
+        painter.setFont(dir_font)
+        painter.setPen(QColor("#555"))
+        painter.drawText(dir_rect, Qt.AlignLeft | Qt.AlignVCenter, _elide(dir_font, directory, cell_w, painter))
+
+    if page_label:
+        painter.setFont(dir_font)
+        painter.setPen(QColor("#666"))
+        painter.drawText(
+            QRectF(margin, page_h - margin - footer + 2, inner_w, footer),
+            Qt.AlignRight | Qt.AlignVCenter,
+            page_label,
+        )
+
+
+def write_contact_pdf(path, images, per_page, paper, landscape):
+    """Write every contact page into one PDF. Returns the number of pages."""
+    page_w, page_h = page_points(paper, landscape)
+    px_w, px_h = page_device_pixels(page_w, page_h)
+    pages = contact_page_slices(images, per_page)
+    writer = QPdfWriter(path)
+    writer.setResolution(CONTACT_SHEET_DPI)
+    writer.setPageSize(QPageSize(QSizeF(page_w, page_h), QPageSize.Point))
+    try:
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageSize.Point)
+    except TypeError:
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+    painter = QPainter(writer)
+    if not painter.isActive():
+        raise OSError(f"Could not create {path}")
+    try:
+        for index, group in enumerate(pages):
+            if index:
+                writer.newPage()
+            paint_contact_page(
+                painter, px_w, px_h, group, per_page,
+                f"{index + 1} / {len(pages)}",
+            )
+    finally:
+        painter.end()
+    return len(pages)
+
+
+def reveal_in_finder(parent, path):
+    """Select a file or folder in Finder."""
+    if not path:
+        return
+    try:
+        subprocess.run(["/usr/bin/open", "-R", path], check=True,
+                       capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        QMessageBox.warning(parent, APP_NAME, f"Could not show this in Finder.\n\n{error}")
+
+
+class ContactSheetDialog(QDialog):
+    """Preview captured frames as a contact sheet and print them to one PDF."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Contact Sheet")
+        self.folder = None
+        self.images = []
+        self.page_index = 0
+        self.source = "batch"
+        self._extra = ""
+        self._busy = False
+
+        layout = QVBoxLayout(self)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Per page:"))
+        self.per_page = QSpinBox()
+        self.per_page.setRange(1, 48)
+        self.per_page.setValue(6)
+        self.per_page.setToolTip("How many frames to place on each page")
+        self.per_page.valueChanged.connect(self._settings_changed)
+        controls.addWidget(self.per_page)
+        controls.addWidget(QLabel("Paper:"))
+        self.paper = QComboBox()
+        self.paper.addItems(list(PAPER_SIZES_PT))
+        self.paper.currentTextChanged.connect(self._settings_changed)
+        controls.addWidget(self.paper)
+        self.orientation = QComboBox()
+        self.orientation.addItems(["Landscape", "Portrait"])
+        self.orientation.currentTextChanged.connect(self._settings_changed)
+        controls.addWidget(self.orientation)
+        controls.addStretch()
+        self.prev_page = QPushButton("‹")
+        self.prev_page.setFixedWidth(36)
+        self.prev_page.clicked.connect(lambda: self._turn(-1))
+        controls.addWidget(self.prev_page)
+        self.page_label = QLabel("Page 0 of 0")
+        controls.addWidget(self.page_label)
+        self.next_page = QPushButton("›")
+        self.next_page.setFixedWidth(36)
+        self.next_page.clicked.connect(lambda: self._turn(1))
+        controls.addWidget(self.next_page)
+        layout.addLayout(controls)
+
+        source_row = QHBoxLayout()
+        self.this_video_btn = QPushButton("This Video")
+        self.this_video_btn.setToolTip("Grab the batch timecode from the highlighted video")
+        self.this_video_btn.clicked.connect(self.use_this_video)
+        source_row.addWidget(self.this_video_btn)
+        self.all_videos_btn = QPushButton("All Videos")
+        self.all_videos_btn.setToolTip("Grab the batch timecode from every video in the folder")
+        self.all_videos_btn.setStyleSheet(
+            "background-color: #1a3d6e; color: white; font-weight: bold; "
+            "border-radius: 5px; border: none;")
+        self.all_videos_btn.clicked.connect(self.use_all_videos)
+        source_row.addWidget(self.all_videos_btn)
+        source_row.addStretch()
+        self.folder_btn = QPushButton("Frame Folder…")
+        self.folder_btn.setToolTip("Open a folder of pictures that are already saved")
+        self.folder_btn.clicked.connect(self.choose_frame_folder)
+        source_row.addWidget(self.folder_btn)
+        layout.addLayout(source_row)
+
+        self.summary = QLabel("No frames yet")
+        self.summary.setStyleSheet("color: #8888aa; font-size: 11px;")
+        layout.addWidget(self.summary)
+
+        self.preview = QLabel("Choose This Video, All Videos, or a folder of frames.")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumHeight(420)
+        self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.preview.setStyleSheet(
+            "background: white; color: #666; border: 1px solid #555570; border-radius: 4px;")
+        layout.addWidget(self.preview, stretch=1)
+
+        actions = QHBoxLayout()
+        self.print_btn = QPushButton("Print to PDF")
+        self.print_btn.setMinimumHeight(36)
+        self.print_btn.setStyleSheet(
+            "background-color: #1e5c3a; color: white; font-weight: bold; "
+            "border-radius: 5px; border: none;")
+        self.print_btn.clicked.connect(self.print_pdf)
+        actions.addWidget(self.print_btn)
+        actions.addStretch()
+        layout.addLayout(actions)
+        self._page_image = None
+        self.resize(880, 700)
+
+    def set_folder(self, folder):
+        self.source = "folder"
+        self.folder = folder
+        self.page_index = 0
+        self._extra = ""
+        paths = list_contact_images(folder)
+        frames = []
+        total = len(paths)
+        for index, path in enumerate(paths, start=1):
+            if total:
+                self.summary.setText(f"Loading {index} of {total}")
+                QApplication.processEvents()
+            frames.append(load_contact_still(path))
+        self.images = frames
+        self._render()
+
+    def reload(self):
+        if self.source == "folder" and self.folder:
+            self.set_folder(self.folder)
+
+    def prepare_batch(self, prompt):
+        self.source = "batch"
+        self.folder = None
+        self.images = []
+        self.page_index = 0
+        self._extra = prompt
+        self._render()
+
+    def set_frames(self, frames, extra=""):
+        self.source = "batch"
+        self.images = list(frames)
+        self.page_index = 0
+        self._extra = extra
+        self._render()
+
+    def set_busy(self, busy):
+        self._busy = busy
+        for button in (self.this_video_btn, self.all_videos_btn, self.folder_btn):
+            button.setEnabled(not busy)
+        self.print_btn.setEnabled((not busy) and bool(self.images))
+
+    def use_this_video(self):
+        parent = self.parent()
+        if parent is not None:
+            parent.fill_contact_sheet(selected_only=True)
+
+    def use_all_videos(self):
+        parent = self.parent()
+        if parent is not None:
+            parent.fill_contact_sheet(selected_only=False)
+
+    def choose_frame_folder(self):
+        parent = self.parent()
+        start = self.folder or ""
+        if parent is not None:
+            start = parent.video_folder or parent.output_folder or start
+        folder = QFileDialog.getExistingDirectory(self, "Choose Folder of Frames", start)
+        if not folder:
+            return
+        self.set_folder(folder)
+        if not self.images:
+            QMessageBox.information(self, "Contact Sheet", _empty_frame_folder_message(folder))
+
+    def _settings_changed(self, _value=None):
+        self.page_index = 0
+        self._render()
+
+    def _turn(self, step):
+        pages = contact_page_slices(self.images, self.per_page.value())
+        if not pages:
+            return
+        self.page_index = min(max(0, self.page_index + step), len(pages) - 1)
+        self._render()
+
+    def _page_setup(self):
+        landscape = self.orientation.currentText() == "Landscape"
+        return page_points(self.paper.currentText(), landscape)
+
+    def _render(self):
+        per_page = self.per_page.value()
+        pages = contact_page_slices(self.images, per_page)
+        count = len(self.images)
+        page_count = len(pages)
+        self.print_btn.setEnabled((not self._busy) and count > 0)
+        self.prev_page.setEnabled(self.page_index > 0)
+        self.next_page.setEnabled(self.page_index < page_count - 1)
+        if page_count == 0:
+            self.page_label.setText("Page 0 of 0")
+            self._page_image = None
+            self.preview.setPixmap(QPixmap())
+            if self.source == "batch":
+                self.summary.setText(self._extra or "Click This Video or All Videos.")
+                self.preview.setText("Click This Video or All Videos.")
+            else:
+                self.summary.setText(
+                    "No pictures in this folder. Frame Folder opens a folder of PNG, JPEG, or TIFF files.")
+                self.preview.setText("Nothing to preview")
+            return
+        self.page_label.setText(f"Page {self.page_index + 1} of {page_count}")
+        summary = (
+            f"{count} frame{'s' if count != 1 else ''}  ·  {per_page} per page  ·  "
+            f"file name and folder under each frame")
+        if self._extra:
+            summary += "  ·  " + self._extra
+        self.summary.setText(summary)
+        page_w, page_h = self._page_setup()
+        px_w, px_h = page_device_pixels(page_w, page_h)
+        image = QImage(max(1, int(round(px_w))), max(1, int(round(px_h))), QImage.Format_RGB32)
+        _set_image_dpi(image, CONTACT_SHEET_DPI)
+        image.fill(Qt.white)
+        painter = QPainter(image)
+        paint_contact_page(
+            painter, px_w, px_h, pages[self.page_index], per_page,
+            f"{self.page_index + 1} / {page_count}",
+        )
+        painter.end()
+        self._page_image = image
+        self.preview.setText("")
+        self._fit_preview()
+
+    def _fit_preview(self):
+        if self._page_image is None:
+            return
+        self.preview.setPixmap(QPixmap.fromImage(self._page_image).scaled(
+            self.preview.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if getattr(self, "preview", None) is not None:
+            self._fit_preview()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._fit_preview()
+
+    def print_pdf(self):
+        if not self.images or self._busy:
+            return
+        save_dir = self.folder
+        parent = self.parent()
+        if not save_dir and parent is not None:
+            save_dir = parent.output_folder or parent.video_folder
+        default = os.path.join(save_dir or os.path.expanduser("~"), "Contact_Sheet.pdf")
+        path, _selected = QFileDialog.getSaveFileName(
+            self, "Print Contact Sheet to PDF", default, "PDF (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        try:
+            pages = write_contact_pdf(
+                path, self.images, self.per_page.value(),
+                self.paper.currentText(),
+                self.orientation.currentText() == "Landscape",
+            )
+        except OSError as error:
+            QMessageBox.warning(self, APP_NAME, f"Could not write the PDF.\n\n{error}")
+            return
+        count = len(self.images)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("Contact Sheet")
+        box.setText(
+            f"Saved {count} frame{'s' if count != 1 else ''} "
+            f"on {pages} page{'s' if pages != 1 else ''}."
+        )
+        box.setInformativeText(path)
+        finder = box.addButton("Show in Finder", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec_()
+        if box.clickedButton() is finder:
+            reveal_in_finder(self, path)
 
 STYLESHEET = """
 QMainWindow, QWidget {
@@ -195,7 +765,7 @@ def _remove_quarantine_attr():
 class VideoFrameCapture(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Shosho Video Frame Capture")
+        self.setWindowTitle(APP_NAME)
         self.setMinimumSize(1100, 740)
         self.setAcceptDrops(True)
 
@@ -207,6 +777,8 @@ class VideoFrameCapture(QMainWindow):
         self.total_frames   = 0
         self.fps            = 30
         self.output_folder  = None
+        self.contact_dialog = None
+        self._contact_busy = False
         self._playing       = False
         self._has_alpha     = False
         self._flash_timer   = QTimer()
@@ -237,11 +809,20 @@ class VideoFrameCapture(QMainWindow):
         folder_btn.clicked.connect(self.select_folder)
         left_panel.addWidget(folder_btn)
 
+        output_row = QHBoxLayout()
+        output_row.setSpacing(6)
         self.output_btn = QPushButton("💾  Output Folder")
         self.output_btn.setMinimumHeight(36)
         self.output_btn.setToolTip("Choose where captured frames are saved")
         self.output_btn.clicked.connect(self.choose_output_folder)
-        left_panel.addWidget(self.output_btn)
+        output_row.addWidget(self.output_btn, stretch=1)
+        self.reveal_output_btn = QPushButton("Show in Finder")
+        self.reveal_output_btn.setMinimumHeight(36)
+        self.reveal_output_btn.setToolTip("Reveal the output folder in Finder")
+        self.reveal_output_btn.setEnabled(False)
+        self.reveal_output_btn.clicked.connect(self.reveal_output_folder)
+        output_row.addWidget(self.reveal_output_btn)
+        left_panel.addLayout(output_row)
 
         self.folder_label = QLabel("No folder selected")
         self.folder_label.setWordWrap(True)
@@ -366,6 +947,11 @@ class VideoFrameCapture(QMainWindow):
         self.quality_val_label.setVisible(False)
         fmt_row.addWidget(self.quality_val_label)
         fmt_row.addStretch()
+        sheet_btn = QPushButton("Contact Sheet…")
+        sheet_btn.setToolTip(
+            "Preview batch timecode frames, or a folder of saved pictures, and print one PDF")
+        sheet_btn.clicked.connect(self.open_contact_sheet)
+        fmt_row.addWidget(sheet_btn)
         right_panel.addLayout(fmt_row)
 
         # ── CAPTURE CONTROLS ──────────────────────────────────────────────────
@@ -537,16 +1123,184 @@ class VideoFrameCapture(QMainWindow):
     def choose_output_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose Output Folder")
         if folder:
-            self.output_folder = folder
-            self.output_label.setText(f"Output: {folder}")
+            self._set_output_folder(folder)
+
+    def _set_output_folder(self, folder):
+        self.output_folder = folder
+        self.output_label.setText(f"Output: {folder}")
+        self.reveal_output_btn.setEnabled(bool(folder))
+        self._refresh_contact_sheet()
+
+    def _ask_contact_source(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("Contact Sheet")
+        box.setText("Where should the frames come from?")
+        box.setInformativeText(
+            "Batch Frames uses the batch timecode on the highlighted video, "
+            "or on every video in the folder.\n\n"
+            "Frame Folder opens a folder of pictures you already have. "
+            "Select Video Folder only lists movies, so a folder of stills belongs here."
+        )
+        batch = box.addButton("Batch Frames", QMessageBox.AcceptRole)
+        folder = box.addButton("Frame Folder…", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is batch:
+            return "batch"
+        if clicked is folder:
+            return "folder"
+        return None
+
+    def _batch_contact_prompt(self):
+        times = ", ".join(f"{tc:.2f}s" for tc in self._get_timecodes())
+        return f"Batch time {times}. Click This Video or All Videos."
+
+    def open_contact_sheet(self):
+        choice = self._ask_contact_source()
+        if choice is None:
+            return
+        if self.contact_dialog is None:
+            self.contact_dialog = ContactSheetDialog(self)
+        if choice == "batch":
+            if not self.video_files:
+                QMessageBox.information(
+                    self, APP_NAME,
+                    "Select a video folder first. Batch Frames reads the movies in that list.",
+                )
+                return
+            self.contact_dialog.prepare_batch(self._batch_contact_prompt())
+        else:
+            start = self.video_folder or self.output_folder or os.path.expanduser("~")
+            folder = QFileDialog.getExistingDirectory(
+                self, "Choose Folder of Frames", start)
+            if not folder:
+                return
+            self.contact_dialog.set_folder(folder)
+            if not self.contact_dialog.images:
+                QMessageBox.information(
+                    self, "Contact Sheet", _empty_frame_folder_message(folder))
+        self.contact_dialog.show()
+        self.contact_dialog.raise_()
+        self.contact_dialog.activateWindow()
+
+    def _refresh_contact_sheet(self):
+        dialog = self.contact_dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        if dialog.source == "folder" and dialog.folder and dialog.folder == self.output_folder:
+            dialog.set_folder(self.output_folder)
+
+    def fill_contact_sheet(self, selected_only):
+        if self._contact_busy:
+            return
+        if selected_only:
+            if not self.current_video_path:
+                QMessageBox.information(self, APP_NAME, "Select a video in the list first.")
+                return
+            paths = [self.current_video_path]
+        else:
+            if not self.video_folder or not self.video_files:
+                QMessageBox.information(self, APP_NAME, "Select a video folder first.")
+                return
+            paths = [os.path.join(self.video_folder, name) for name in self.video_files]
+        dialog = self.contact_dialog
+        if dialog is None:
+            dialog = ContactSheetDialog(self)
+            self.contact_dialog = dialog
+            dialog.show()
+        self._contact_busy = True
+        dialog.set_busy(True)
+        try:
+            cells, skipped, errors = self._grab_contact_frames(paths)
+        finally:
+            self._contact_busy = False
+            if dialog is not None:
+                dialog.set_busy(False)
+        if dialog is None or not dialog.isVisible():
+            return
+        dialog.set_frames(cells, _contact_extra(skipped, errors))
+        if not cells:
+            QMessageBox.information(
+                self, "Contact Sheet",
+                _contact_detail(skipped, errors) or "No frames were read.",
+            )
+
+    def _grab_contact_frames(self, paths):
+        timecodes = self._get_timecodes()
+        cells = []
+        skipped = []
+        errors = []
+        total = max(1, len(paths) * len(timecodes))
+        self.progress.setVisible(True)
+        self.progress.setMaximum(total)
+        self.progress.setValue(0)
+        done = 0
+        dialog = self.contact_dialog
+        try:
+            for path in paths:
+                if dialog is not None and not dialog.isVisible():
+                    break
+                filename = os.path.basename(path)
+                directory = os.path.dirname(path)
+                cap = cv2.VideoCapture(path)
+                try:
+                    if not cap.isOpened():
+                        errors.append(f"{filename}: could not open")
+                        done += len(timecodes)
+                        self._report_contact_grab(done, total, filename)
+                        continue
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+                    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    for tc in timecodes:
+                        if dialog is not None and not dialog.isVisible():
+                            break
+                        done += 1
+                        target = contact_seek_frame(tc, fps, count)
+                        if target == -1:
+                            duration = (count - 1) / fps if fps else 0
+                            skipped.append(
+                                f"{filename}: {float(tc):.2f}s is past the end ({duration:.2f}s)")
+                        else:
+                            if target is None:
+                                cap.set(cv2.CAP_PROP_POS_MSEC, float(tc) * 1000.0)
+                            else:
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+                            ok, frame = cap.read()
+                            image = numpy_frame_to_qimage(frame) if ok else QImage()
+                            if image.isNull():
+                                errors.append(
+                                    f"{filename} @ {float(tc):.2f}s: could not read frame")
+                            else:
+                                cells.append(ContactFrame(
+                                    f"{filename}  {float(tc):.2f}s", directory, image=image))
+                        self._report_contact_grab(done, total, filename)
+                finally:
+                    cap.release()
+        finally:
+            self.progress.setVisible(False)
+        return cells, skipped, errors
+
+    def _report_contact_grab(self, done, total, filename):
+        self.progress.setValue(min(done, total))
+        dialog = self.contact_dialog
+        if dialog is not None:
+            dialog.summary.setText(f"Reading {min(done, total)} of {total}  ·  {filename}")
+        QApplication.processEvents()
+
+    def reveal_output_folder(self):
+        folder = self.output_folder
+        if not folder:
+            return
+        os.makedirs(folder, exist_ok=True)
+        reveal_in_finder(self, folder)
 
     def _load_folder(self, folder):
         self.video_folder = folder
         self.folder_label.setText(folder)
 
         if not self.output_folder:
-            self.output_folder = os.path.join(folder, "captured_frames")
-            self.output_label.setText(f"Output: {self.output_folder}")
+            self._set_output_folder(os.path.join(folder, "captured_frames"))
         os.makedirs(self.output_folder, exist_ok=True)
 
         self.video_files = sorted(
@@ -807,6 +1561,7 @@ class VideoFrameCapture(QMainWindow):
 
         self.status_label.setText(f"✅  Saved: {os.path.basename(path)}")
         self._flash_capture()
+        self._refresh_contact_sheet()
 
     def _flash_capture(self):
         self.preview_label.setStyleSheet(
@@ -878,6 +1633,7 @@ class VideoFrameCapture(QMainWindow):
         if errors:
             msg += f"\n\n⚠️ Errors ({len(errors)}):\n" + "\n".join(errors[:10])
         self.status_label.setText(msg.split("\n")[0])
+        self._refresh_contact_sheet()
         QMessageBox.information(self, "Batch Complete", msg)
 
     # ── Interval capture ──────────────────────────────────────────────────────
@@ -946,6 +1702,7 @@ class VideoFrameCapture(QMainWindow):
         if errors:
             msg += f"\n\n⚠️ Errors ({len(errors)}):\n" + "\n".join(errors[:10])
         self.status_label.setText(msg.split("\n")[0])
+        self._refresh_contact_sheet()
         if len(paths) > 1 or errors:
             QMessageBox.information(self, "Interval Capture Complete", msg)
 
@@ -1029,6 +1786,7 @@ class VideoFrameCapture(QMainWindow):
         if errors:
             msg += f"\n\n⚠️ Errors ({len(errors)}):\n" + "\n".join(errors[:10])
         self.status_label.setText(msg.split("\n")[0])
+        self._refresh_contact_sheet()
         QMessageBox.information(self, "Scene Capture Complete", msg)
 
     # ── Drag and drop ─────────────────────────────────────────────────────────
@@ -1078,6 +1836,8 @@ class VideoFrameCapture(QMainWindow):
 if __name__ == "__main__":
     _remove_quarantine_attr()
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLESHEET)
     window = VideoFrameCapture()

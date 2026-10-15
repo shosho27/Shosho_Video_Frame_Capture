@@ -1,4 +1,4 @@
-# Shosho Video Frame Capture
+# Video Frame Capture
 
 A macOS desktop app for extracting still frames from video files.
 

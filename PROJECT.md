@@ -1,4 +1,4 @@
-# Project — Shosho Video Frame Capture
+# Project — Video Frame Capture
 
 ---
 

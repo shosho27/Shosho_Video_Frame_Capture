@@ -1,4 +1,4 @@
-# Architecture — Shosho Video Frame Capture
+# Architecture — Video Frame Capture
 
 ## Overview
 
