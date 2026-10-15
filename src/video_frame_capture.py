@@ -38,6 +38,7 @@ from PyQt5.QtGui import (
     QPainter, QPdfWriter, QPageSize, QPen, QFontMetrics,
 )
 from PyQt5.QtCore import Qt, QTimer, QSizeF, QRectF, QMarginsF
+from video_downloader import DownloadDialog
 
 APP_NAME = "Video Frame Capture"
 
@@ -781,6 +782,7 @@ class VideoFrameCapture(QMainWindow):
         self._contact_busy = False
         self._playing       = False
         self._has_alpha     = False
+        self.download_dialog = None
         self._flash_timer   = QTimer()
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._clear_flash)
@@ -808,6 +810,12 @@ class VideoFrameCapture(QMainWindow):
         folder_btn.setMinimumHeight(36)
         folder_btn.clicked.connect(self.select_folder)
         left_panel.addWidget(folder_btn)
+
+        download_btn = QPushButton("↓  Download Video from Link")
+        download_btn.setMinimumHeight(36)
+        download_btn.setToolTip("YouTube, X / Twitter, Facebook, Instagram, and TikTok")
+        download_btn.clicked.connect(self.open_downloader)
+        left_panel.addWidget(download_btn)
 
         output_row = QHBoxLayout()
         output_row.setSpacing(6)
@@ -1105,6 +1113,20 @@ class VideoFrameCapture(QMainWindow):
 
         main_layout.addWidget(left_widget)
         main_layout.addWidget(right_widget, stretch=1)
+
+    def open_downloader(self):
+        if self.download_dialog is None:
+            self.download_dialog = DownloadDialog(self, ffmpeg=_find_ffmpeg())
+            self.download_dialog.video_ready.connect(self._load_download)
+        self.download_dialog.show()
+        self.download_dialog.raise_()
+        self.download_dialog.activateWindow()
+
+    def _load_download(self, path):
+        self._load_folder(os.path.dirname(path))
+        name = os.path.basename(path)
+        if name in self.video_files:
+            self.file_list.setCurrentRow(self.video_files.index(name))
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+S"), self, self.capture_single)
@@ -1827,6 +1849,12 @@ class VideoFrameCapture(QMainWindow):
             self.show_frame(self.frame_slider.value())
 
     def closeEvent(self, event):
+        if self.download_dialog is not None and self.download_dialog.is_busy():
+            self.download_dialog.show()
+            self.download_dialog.raise_()
+            self.download_dialog.status.setText('Cancel the download before closing the app.')
+            event.ignore()
+            return
         self._stop_playback()
         if self.current_cap:
             self.current_cap.release()

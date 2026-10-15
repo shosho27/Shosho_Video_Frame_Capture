@@ -1,32 +1,39 @@
 # Building and Distributing Video Frame Capture
 
-## Build the .app
+Build on an Apple Silicon Mac. The finished app includes Python, PyQt5, OpenCV,
+yt-dlp, its JavaScript solver, Deno, and FFmpeg. Users do not need Python,
+Homebrew, or a separate FFmpeg installation.
 
 ```bash
-pip install pyinstaller
-cd /path/to/Shosho_Video_Frame_Capture
-
-pyinstaller "Video Frame Capture.spec" --noconfirm
-# Output: dist/Video Frame Capture.app
+cd /Users/sashornock/Documents/Scripts/ScriptProduction/Shosho_Video_Frame_Capture
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt pyinstaller
+brew install deno
+.venv/bin/python build_app.py
 ```
 
----
+The output is `dist/Video Frame Capture.app`. FFmpeg is shared by scene
+detection, audio/video merging, and MKV-to-MP4 conversion. The downloader runs
+as a subprocess of the bundled app.
 
-## Sign the app
+The build script ad-hoc signs the app and verifies its signature. This is a
+local build, not an Apple-notarized distribution.
 
 ### Ad-hoc signing (free, no Apple Developer account)
 
+`build_app.py` already does this. To sign again:
+
 ```bash
+cd /Users/sashornock/Documents/Scripts/ScriptProduction/Shosho_Video_Frame_Capture
 codesign --deep --force --sign - "dist/Video Frame Capture.app"
 ```
 
-Recipients just double-click the app — it automatically removes the quarantine flag on first run, so no manual `xattr` step is needed.
+The app removes its quarantine flag on first run.
 
-### Full signing + notarization (Apple Developer Program — $99/year)
-
-Enroll at **developer.apple.com/programs/enroll**
+### Full signing + notarization (Apple Developer Program)
 
 ```bash
+cd /Users/sashornock/Documents/Scripts/ScriptProduction/Shosho_Video_Frame_Capture
 codesign --deep --force \
   --sign "Developer ID Application: Your Name (TEAMID)" \
   --options runtime \
@@ -41,10 +48,9 @@ xcrun notarytool submit "dist/Video Frame Capture.app" \
 xcrun stapler staple "dist/Video Frame Capture.app"
 ```
 
----
-
 ## Distribution notes
 
 - Current build is **arm64 (Apple Silicon) only**
-- The `dist/` folder is excluded from git — do not commit built apps
-- Always re-sign after every rebuild
+- Do not commit `dist/`, `build/`, or generated `.spec` files
+- Keep `build_app.py` and `requirements.txt` in version control
+- Third-party component information is in `THIRD_PARTY_NOTICES.md`

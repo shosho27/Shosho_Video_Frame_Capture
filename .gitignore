@@ -8,3 +8,4 @@ __pycache__/
 *.spec
 assets/ffmpeg
 captured_frames/
+/*.app

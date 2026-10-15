@@ -27,9 +27,9 @@ by being correct. Interval capture on a 126s HEVC clip went 46s -> 23s at 1s.
 
 ## Scene detection requires FFmpeg
 
-The Scene Capture mode shells out to FFmpeg for cut detection. If FFmpeg is
-not in PATH or the common Homebrew locations, a warning dialog is shown and
-no frames are captured. Install via `brew install ffmpeg`.
+The Scene Capture mode shells out to FFmpeg for cut detection. The standalone app includes FFmpeg through imageio-ffmpeg. Source installations
+get it from requirements.txt. A missing or damaged bundled binary can prevent
+scene capture and conversion; reinstall the app or its source dependencies.
 
 ## Scene detection is threshold-sensitive
 
