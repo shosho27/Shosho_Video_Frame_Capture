@@ -2,84 +2,46 @@
 
 ---
 
-## High priority
+## Completed Features
 
-### Use current frame position for batch
+### Interactive Timeline, J/K/L Shuttle & Numeric Timing Strip
 **Status:** Done
-Button pushes current scrubber timecode into batch spin box.
+- Visual `TimelineMapBar` showing draggable green `[` / `]` Trim In & Out lines (double-click to reset), draggable orange Markup spans, cyan Hold Frame pause window, and gold Scene/Chapter ticks.
+- Live numeric timing spinboxes directly above the scrubber (`Playhead` jump-to-time + `Go`, `Clip` Trim In/Out, `🖍 Markup` start/end times, `❄️ Hold` timestamp + duration).
+- `J` / `K` / `L` shuttle transport supporting `-16x` to `+16x` (`1x, 2x, 4x, 8x, 16x`).
+- `Spacebar` dedicated to play/pause with `Qt.NoFocus` on buttons so Spacebar never toggles focused controls.
 
-### Play / pause button
+### Timed On-Video Markup & Hold Frame
 **Status:** Done
-QTimer at native FPS, Space bar toggles, stops at last frame.
+- Draw Boxes, Circles, Arrows, Lines, and Text with customizable color and line width.
+- Every markup item has editable `start_sec` and `end_sec` (defaulting to a 3-second range) and can be moved/resized on canvas or timeline.
+- Hold / Freeze Frame (`❄️ Hold`) pauses playback for `N` seconds and renders into exported MP4s; preserved when adjusting Trim Out.
 
-### Output format options
+### Trim, Fade, MP4 Quality, 1-Click MP3 & GIF Export
 **Status:** Done
-PNG / JPEG (quality slider) / TIFF selector. Chooseable output folder button.
+- MP4 Quality selector (`CRF 16 High`, `CRF 20 Balanced`, `CRF 24 Compact`, `CRF 28 Small File`).
+- 1-Click MP3 extraction (`320k`, `192k`, `128k`) and animated GIF export.
+- Video & audio fade-in / fade-out (`Fade In`, `Fade Out`).
 
-### Interval capture
+### Scene Detection, Split Clips & QuickTime MP4 Chapters
 **Status:** Done
-"Every N seconds" spinner (0.1–3600 s, default 3 s). Two buttons: This Video
-(sweeps the currently loaded video) and All Videos (batch across the whole folder).
-Output named `{stem}_{t:.1f}s.{ext}`. Progress bar sized by fast metadata probe.
+- Auto-detect scene cuts via FFmpeg (`🔍 Detect`) and add/remove manual cut markers (`+ Cut`, `- Cut`, `Clear`).
+- Respects `[Trim In → Trim Out]` boundaries for scene detection, splitting into `<stem>_segments/`, and exporting chapters.
+- QuickTime Player compatible MP4 chapters (`📑 MP4 + Chapters`) with ISO-639-2 `'eng'` (`0x15c7`) `mdhd` language tagging.
 
-### Scene capture
+### Voiceover Dub Recording & Offline AI Captions
 **Status:** Done
-FFmpeg `select='gt(scene,threshold)'` scene detection ported from Vanilla Splice.
-Sensitivity slider (0.10–0.90, default 0.40 — lower = more cuts detected).
-Two buttons: This Video and All Videos. Captures midpoint frame of each scene,
-named `{stem}_scene{N:03d}_{start:.2f}s.{ext}`. Warns if FFmpeg not in PATH.
+- Live microphone dub recording (`🎙 Dub Record`, `🔊 Play`, `📂 Dub File`) synced with video preview playback and adjustable original-audio mix (`0–200%`).
+- Offline Whisper AI speech-to-text transcription (`💬 Captions AI` → `✨ Auto-Transcribe (Offline AI)`) using bundled `faster-whisper` (`tiny.en`), plus `.srt` import/export and subtitle burn-in.
 
----
-
-## Medium priority
-
-### Keyboard shortcuts
+### Still Frame Capture Modes & Organized Subfolders
 **Status:** Done
-- Space — play / pause
-- Left / Right — previous / next frame
-- Shift+Left / Shift+Right — ±1 second
-- Cmd+S — capture current frame
+- Single, Batch, Interval, and Scene capture modes laid out in a clean 4-card horizontal tab.
+- Saves captured still images into an organized `<output_folder>/<video_stem>_frames/` subfolder (matching `<video_stem>_segments/`).
+- Contact Sheet PDF generator automatically discovers images in the output folder and `*_frames/` subfolders.
 
-### Video info display
+### Video Import, Link Downloader & Self-Contained macOS App
 **Status:** Done
-Info bar shows codec resolution, FPS, frame count, duration for loaded video.
-File list shows resolution, duration, FPS per file.
-
-### Sync batch timecode from scrubber
-**Status:** Done (← Use Current Frame button)
-
----
-
-## Low priority
-
-### Drag and drop
-**Status:** Done
-Accepts drop of video folder or individual video file onto window.
-
-### Multiple timecode batch
-**Status:** Done
-Timecode list — add/remove timecodes, batch runs for all of them.
-
-### Dark theme consistency
-**Status:** Done
-Full STYLESHEET applied via app.setStyleSheet() — covers all widget types.
-
-### Capture confirmation feedback
-**Status:** Done
-Preview border flashes green for 500ms after each capture.
-
----
-
-## Open / future
-
-### Background threading
-Interval and scene batch runs block the main thread (same as existing batch).
-Moving to QThread would prevent UI sluggishness on large folders.
-
-### Face-filter for scene capture
-Vanilla Splice already has MediaPipe face detection at scene midpoints.
-Could add a "Faces Only" toggle to skip scenes with no detected face.
-
-### Scene preview list
-Show detected scenes as thumbnails in the left panel before capturing,
-so the user can deselect individual scenes.
+- `📂 Import Video(s)`, `📁 Open Folder`, and drag-and-drop support.
+- `🌐 Download Link` (`yt-dlp` + bundled FFmpeg H.264/MP4 conversion + MP3 extraction) and `🔄 Update Engine`.
+- Standalone `dist/Video Frame Capture.app` bundle built with `build_app.py`.
