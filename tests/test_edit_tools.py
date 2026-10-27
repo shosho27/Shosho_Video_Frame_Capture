@@ -226,19 +226,84 @@ class EditToolsTests(unittest.TestCase):
         window.btn_freeze_here.setChecked(True)
         self.assertIn("Hold Frame: [1.00s → +2.5s (ends 3.50s)]", window.feedback_banner.text())
 
-        # JKL transport shuttle
-        window.shuttle_forward()
-        self.assertTrue(window._playing)
-        self.assertEqual(window._playback_rate, 1.0)
-        window.shuttle_forward()
-        self.assertEqual(window._playback_rate, 2.0)
-        window.shuttle_reverse()
-        self.assertEqual(window._playback_rate, -1.0)
-        window.shuttle_reverse()
-        self.assertEqual(window._playback_rate, -2.0)
+        # Setting an Out point or dragging Out line must NOT clear Hold Frame!
+        window.frame_slider.setValue(16)  # 1.60s
+        window.set_trim_out()
+        self.assertTrue(window.btn_freeze_here.isChecked())
+        self.assertAlmostEqual(window.freeze_at_sec, 1.0, places=2)
+        window._on_timeline_drag_out(1.9)
+        self.assertAlmostEqual(window.out_spin.value(), 1.9, places=2)
+        self.assertTrue(window.btn_freeze_here.isChecked())
+        self.assertIn("Hold Frame: [1.00s → +2.5s", window.feedback_banner.text())
+
+        # Typing directly into Markup End spinbox extends the arrow duration
+        window.markup_end_spin.setValue(1.95)
+        self.assertAlmostEqual(window.preview_label.annotations[-1].end_sec, 1.95, places=2)
+
+        # JKL transport shuttle up to 16x and -16x
+        for expected in (1.0, 2.0, 4.0, 8.0, 16.0, 16.0):
+            window.shuttle_forward()
+            self.assertTrue(window._playing)
+            self.assertEqual(window._playback_rate, expected)
+        for expected in (-1.0, -2.0, -4.0, -8.0, -16.0, -16.0):
+            window.shuttle_reverse()
+            self.assertTrue(window._playing)
+            self.assertEqual(window._playback_rate, expected)
         window.shuttle_pause()
         self.assertFalse(window._playing)
+
+        # Still frame capture organizes images into <output_folder>/<stem>_frames/
+        window.capture_single()
+        frames_subdir = os.path.join(window.output_folder, "sample_frames")
+        self.assertTrue(os.path.isdir(frames_subdir))
+        captured_files = [f for f in os.listdir(frames_subdir) if f.endswith(".png")]
+        self.assertEqual(len(captured_files), 1)
+
+        # Compact UI layout check: minimumSizeHint height fits laptop screens without squishing
+        self.assertLessEqual(window.minimumSizeHint().height(), 780)
         window.close()
+
+    def test_scene_split_respects_in_out_bounds_and_quicktime_chapters(self):
+        # Create a 3-scene video (0-1s blue, 1-2s red, 2-3s green)
+        vid3 = os.path.join(self.temp.name, "three_scenes.mp4")
+        subprocess.run(
+            [
+                self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=blue:s=160x120:r=10:d=1",
+                "-f", "lavfi", "-i", "color=c=red:s=160x120:r=10:d=1",
+                "-f", "lavfi", "-i", "color=c=green:s=160x120:r=10:d=1",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+                "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+                "-map", "[v]", "-map", "3:a",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                vid3,
+            ],
+            check=True,
+        )
+        # Split strictly within [0.5s, 2.5s] with cut at 1.0s and 2.0s (cut at 0.2s & 2.8s ignored)
+        seg_dir = os.path.join(self.temp.name, "bounded_segs")
+        files = split_video_by_cuts(
+            self.ffmpeg, vid3, seg_dir, [0.2, 1.0, 2.0, 2.8],
+            start_sec=0.5, end_sec=2.5, mp4_quality="medium",
+        )
+        self.assertEqual(len(files), 3)
+        self.assertTrue(os.path.basename(files[0]).endswith("0.50s-1.00s.mp4"))
+        self.assertTrue(os.path.basename(files[-1]).endswith("2.00s-2.50s.mp4"))
+
+        # Export MP4 with chapters within [0.5s, 2.5s] and verify QuickTime English locale tag (0x15c7)
+        chap_mp4 = os.path.join(self.temp.name, "qt_chapters.mp4")
+        saved_path, chapters = export_mp4_with_chapters(
+            self.ffmpeg, vid3, chap_mp4, [1.0, 2.0],
+            chapter_titles={0.5: "Part A", 1.0: "Part B", 2.0: "Part C"},
+            start_sec=0.5, end_sec=2.5,
+        )
+        self.assertEqual(len(chapters), 3)
+        self.assertEqual(chapters[0], (0.0, 0.5, "Part A"))
+        self.assertEqual(chapters[1], (0.5, 1.5, "Part B"))
+        self.assertEqual(chapters[2], (1.5, 2.0, "Part C"))
+        with open(saved_path, "rb") as fh:
+            raw = fh.read()
+        self.assertIn(b"\x15\xc7", raw)
 
 
 if __name__ == "__main__":

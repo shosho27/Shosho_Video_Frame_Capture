@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import cv2
 import numpy as np
@@ -99,18 +100,24 @@ def contact_grid(per_page, page_w, page_h):
 
 
 def list_contact_images(folder):
-    """Image files in one folder, sorted by file name. Subfolders are skipped."""
+    """Image files in one folder (or its *_frames subfolders), sorted by file name."""
     if not folder or not os.path.isdir(folder):
         return []
     found = []
+    sub_found = []
     for name in os.listdir(folder):
-        if os.path.splitext(name)[1].lower() not in CONTACT_IMAGE_EXTENSIONS:
-            continue
         path = os.path.join(folder, name)
-        if os.path.isfile(path):
+        if os.path.isfile(path) and os.path.splitext(name)[1].lower() in CONTACT_IMAGE_EXTENSIONS:
             found.append(path)
-    found.sort(key=lambda path: os.path.basename(path).casefold())
-    return found
+        elif os.path.isdir(path) and name.endswith("_frames"):
+            for sub_name in os.listdir(path):
+                if os.path.splitext(sub_name)[1].lower() in CONTACT_IMAGE_EXTENSIONS:
+                    sub_path = os.path.join(path, sub_name)
+                    if os.path.isfile(sub_path):
+                        sub_found.append(sub_path)
+    result = found if found else sub_found
+    result.sort(key=lambda path: os.path.basename(path).casefold())
+    return result
 
 
 def contact_page_slices(paths, per_page):
@@ -634,10 +641,11 @@ QPushButton {
     color: #dcdcf0;
     border: 1px solid #555570;
     border-radius: 4px;
-    padding: 4px 10px;
+    padding: 3px 8px;
 }
 QPushButton:hover  { background-color: #4a4a64; }
 QPushButton:pressed { background-color: #252535; }
+QPushButton:checked { background-color: #0e7c86; color: #ffffff; border-color: #00e5ff; font-weight: bold; }
 QPushButton:disabled { color: #666680; background-color: #2e2e3e; border-color: #44445a; }
 QGroupBox {
     border: 1px solid #555570;
@@ -648,6 +656,32 @@ QGroupBox {
     font-weight: bold;
 }
 QGroupBox::title { subcontrol-origin: margin; left: 8px; }
+QTabWidget::pane {
+    border: 1px solid #555570;
+    border-radius: 5px;
+    background-color: #23232e;
+    top: -1px;
+}
+QTabBar::tab {
+    background-color: #2e2e40;
+    color: #aaaaee;
+    border: 1px solid #555570;
+    border-bottom: none;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    padding: 5px 10px;
+    margin-right: 4px;
+    font-weight: bold;
+}
+QTabBar::tab:selected {
+    background-color: #2a6ada;
+    color: #ffffff;
+    border-color: #4a8aff;
+}
+QTabBar::tab:hover:!selected {
+    background-color: #3d3d56;
+    color: #ffffff;
+}
 QListWidget {
     background-color: #1e1e2e;
     border: 1px solid #555570;
@@ -668,12 +702,13 @@ QSlider::handle:horizontal {
     border-radius: 7px;
 }
 QSlider::sub-page:horizontal { background: #2a6ada; border-radius: 3px; }
-QDoubleSpinBox, QComboBox {
+QDoubleSpinBox, QSpinBox, QComboBox {
     background-color: #1e1e2e;
     color: #dcdcf0;
     border: 1px solid #555570;
     border-radius: 4px;
-    padding: 2px 6px;
+    padding: 2px 5px;
+    min-height: 22px;
 }
 QComboBox::drop-down { border: none; }
 QComboBox QAbstractItemView {
@@ -751,7 +786,7 @@ def _find_ffmpeg():
     return None
 
 
-def _detect_scene_cuts(video_path, threshold=0.4):
+def _detect_scene_cuts(video_path, threshold=0.4, start_sec=0.0, end_sec=None):
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
         return None
@@ -762,10 +797,17 @@ def _detect_scene_cuts(video_path, threshold=0.4):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     timestamps = set()
+    s_bound = max(0.0, float(start_sec or 0.0))
+    e_bound = float(end_sec) if (end_sec is not None and end_sec > s_bound) else None
     for line in result.stderr.splitlines():
         m = re.search(r"pts_time:([\d.]+)", line)
         if m:
-            timestamps.add(float(m.group(1)))
+            t = float(m.group(1))
+            if t <= s_bound + 0.05:
+                continue
+            if e_bound is not None and t >= e_bound - 0.05:
+                continue
+            timestamps.add(t)
     return sorted(timestamps)
 
 
@@ -784,7 +826,7 @@ class VideoFrameCapture(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(1100, 740)
+        self.setMinimumSize(1120, 740)
         self.setAcceptDrops(True)
 
         self.video_folder   = None
@@ -808,8 +850,9 @@ class VideoFrameCapture(QMainWindow):
         self.caption_cues   = []
         self.narration_path = None
         self._mic_process   = None
+        self._dub_player_proc = None
         self._whisper_worker = None
-        self._playback_rate = 1.0  # JKL shuttle rate (-4, -2, -1, 0, 1, 2, 4)
+        self._playback_rate = 1.0  # JKL shuttle rate (-16..-1, 0, 1..16)
         self._flash_timer   = QTimer()
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._clear_flash)
@@ -834,7 +877,7 @@ class VideoFrameCapture(QMainWindow):
         left_panel.setSpacing(6)
 
         import_btn = QPushButton("🎬  Import Video File…")
-        import_btn.setMinimumHeight(36)
+        import_btn.setMinimumHeight(34)
         import_btn.setStyleSheet(
             "background-color: #1e5c3a; color: white; font-weight: bold; "
             "border-radius: 4px; border: 1px solid #2ecc71;"
@@ -844,12 +887,12 @@ class VideoFrameCapture(QMainWindow):
         left_panel.addWidget(import_btn)
 
         folder_btn = QPushButton("📁  Select Video Folder")
-        folder_btn.setMinimumHeight(36)
+        folder_btn.setMinimumHeight(34)
         folder_btn.clicked.connect(self.select_folder)
         left_panel.addWidget(folder_btn)
 
         download_btn = QPushButton("↓  Download Video from Link")
-        download_btn.setMinimumHeight(36)
+        download_btn.setMinimumHeight(34)
         download_btn.setToolTip(
             "YouTube, Vimeo, X / Twitter, Facebook, Instagram, TikTok, "
             "Reddit, Twitch, LinkedIn, Dailymotion, and Loom"
@@ -858,14 +901,14 @@ class VideoFrameCapture(QMainWindow):
         left_panel.addWidget(download_btn)
 
         output_row = QHBoxLayout()
-        output_row.setSpacing(6)
-        self.output_btn = QPushButton("💾  Output Folder")
-        self.output_btn.setMinimumHeight(36)
-        self.output_btn.setToolTip("Choose where captured frames are saved")
+        output_row.setSpacing(4)
+        self.output_btn = QPushButton("💾 Output Folder")
+        self.output_btn.setMinimumHeight(34)
+        self.output_btn.setToolTip("Choose where captured frames, clips, MP3s, and segments are saved")
         self.output_btn.clicked.connect(self.choose_output_folder)
         output_row.addWidget(self.output_btn, stretch=1)
-        self.reveal_output_btn = QPushButton("Show in Finder")
-        self.reveal_output_btn.setMinimumHeight(36)
+        self.reveal_output_btn = QPushButton("Finder")
+        self.reveal_output_btn.setMinimumHeight(34)
         self.reveal_output_btn.setToolTip("Reveal the output folder in Finder")
         self.reveal_output_btn.setEnabled(False)
         self.reveal_output_btn.clicked.connect(self.reveal_output_folder)
@@ -888,27 +931,27 @@ class VideoFrameCapture(QMainWindow):
 
         left_widget = QWidget()
         left_widget.setLayout(left_panel)
-        left_widget.setMaximumWidth(300)
+        left_widget.setFixedWidth(270)
 
         # ── RIGHT PANEL ───────────────────────────────────────────────────────
         right_panel = QVBoxLayout()
-        right_panel.setSpacing(5)
+        right_panel.setSpacing(4)
 
         # Preview
         self.preview_label = AnnotatedPreviewLabel(
-            "Select a folder and video to begin\n\nYou can also drag and drop a folder or video file here"
+            "Select a folder or import a video to begin\n\nYou can also drag and drop a folder or video file here"
         )
         self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumHeight(300)
+        self.preview_label.setMinimumHeight(210)
         self.preview_label.setStyleSheet(
             "background-color: #1a1a2e; color: #555570; border-radius: 8px; "
             "font-size: 13px; border: 2px solid #2a2a40;")
         self.preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        right_panel.addWidget(self.preview_label)
+        right_panel.addWidget(self.preview_label, stretch=1)
 
-        # Markup & Freeze toolbar right under preview
+        # Compact Markup & Quick Capture toolbar right under preview
         markup_row = QHBoxLayout()
-        markup_row.setSpacing(4)
+        markup_row.setSpacing(5)
         markup_row.addWidget(QLabel("Markup:"))
         self.tool_combo = QComboBox()
         for label, tool_id in [
@@ -932,36 +975,36 @@ class VideoFrameCapture(QMainWindow):
         )
         markup_row.addWidget(self.color_combo)
 
-        markup_row.addWidget(QLabel("Size:"))
+        markup_row.addWidget(QLabel("Width:"))
         self.thickness_spin = QSpinBox()
         self.thickness_spin.setRange(2, 14)
         self.thickness_spin.setValue(4)
-        self.thickness_spin.setFixedWidth(48)
+        self.thickness_spin.setFixedWidth(52)
         self.thickness_spin.valueChanged.connect(
             lambda v: setattr(self.preview_label, "thickness", v)
         )
         markup_row.addWidget(self.thickness_spin)
 
-        markup_row.addWidget(QLabel("Show for:"))
+        markup_row.addWidget(QLabel("Duration:"))
         self.markup_dur_spin = QDoubleSpinBox()
-        self.markup_dur_spin.setRange(0.0, 60.0)
+        self.markup_dur_spin.setRange(0.0, 120.0)
         self.markup_dur_spin.setSingleStep(0.5)
         self.markup_dur_spin.setValue(3.0)
         self.markup_dur_spin.setSuffix("s")
         self.markup_dur_spin.setSpecialValueText("All Clip")
         self.markup_dur_spin.setToolTip(
-            "How long newly drawn markup stays on screen from the current timecode (0s = entire video)"
+            "How long newly drawn markup stays on screen (or change Start/End in the timing strip below)"
         )
-        self.markup_dur_spin.setFixedWidth(68)
+        self.markup_dur_spin.setFixedWidth(78)
         self.markup_dur_spin.valueChanged.connect(self._on_markup_duration_changed)
         markup_row.addWidget(self.markup_dur_spin)
 
-        btn_markup_in = QPushButton("[ Markup In")
+        btn_markup_in = QPushButton("[In")
         btn_markup_in.setToolTip("Set latest markup's start time to current playhead")
         btn_markup_in.clicked.connect(self.set_last_markup_in)
         markup_row.addWidget(btn_markup_in)
 
-        btn_markup_out = QPushButton("Markup Out ]")
+        btn_markup_out = QPushButton("Out]")
         btn_markup_out.setToolTip("Set latest markup's end time to current playhead")
         btn_markup_out.clicked.connect(self.set_last_markup_out)
         markup_row.addWidget(btn_markup_out)
@@ -980,36 +1023,163 @@ class VideoFrameCapture(QMainWindow):
         markup_row.addWidget(btn_copy_clip)
 
         markup_row.addStretch()
-        self.btn_freeze_here = QPushButton("❄️ Hold Frame:")
-        self.btn_freeze_here.setCheckable(True)
-        self.btn_freeze_here.setToolTip("Freeze on the current frame during exported clip/GIF to emphasize markup")
-        self.btn_freeze_here.toggled.connect(self._toggle_freeze_point)
-        markup_row.addWidget(self.btn_freeze_here)
 
-        self.freeze_dur_spin = QDoubleSpinBox()
-        self.freeze_dur_spin.setRange(0.5, 15.0)
-        self.freeze_dur_spin.setSingleStep(0.5)
-        self.freeze_dur_spin.setValue(3.0)
-        self.freeze_dur_spin.setSuffix("s")
-        self.freeze_dur_spin.setFixedWidth(64)
-        self.freeze_dur_spin.valueChanged.connect(self._update_timeline_feedback)
-        markup_row.addWidget(self.freeze_dur_spin)
+        quick_cap_btn = QPushButton("📸 Capture Still")
+        quick_cap_btn.setStyleSheet(
+            "background-color: #1e5c3a; color: white; font-weight: bold; "
+            "border-radius: 4px; border: 1px solid #2ecc71; padding: 3px 10px;"
+        )
+        quick_cap_btn.setToolTip("Save current frame into this video's still frames folder (Cmd+S)")
+        quick_cap_btn.clicked.connect(self.capture_single)
+        markup_row.addWidget(quick_cap_btn)
         right_panel.addLayout(markup_row)
         self.preview_label.annotations_changed.connect(self._update_timeline_feedback)
 
-        # Video info bar + live Markup / Hold feedback badge
+        # Video info bar + live status summary banner
+        info_banner_row = QHBoxLayout()
+        info_banner_row.setSpacing(8)
         self.info_bar = QLabel("")
         self.info_bar.setStyleSheet("color: #8888aa; font-size: 10px; padding: 1px 2px;")
-        right_panel.addWidget(self.info_bar)
+        info_banner_row.addWidget(self.info_bar)
+        info_banner_row.addStretch()
+        self.feedback_banner = QLabel("Timeline: Full clip  ·  Markup: None  ·  Hold: Off  ·  Transport: J/K/L (up to 16x)")
+        self.feedback_banner.setStyleSheet("color: #8ac4ff; font-size: 10px; font-weight: bold;")
+        info_banner_row.addWidget(self.feedback_banner)
+        right_panel.addLayout(info_banner_row)
 
-        self.feedback_banner = QLabel("Timeline: Full clip  ·  Markup: None  ·  Hold: Off  ·  Transport: J (Rev) / K (Pause) / L (Fwd)")
-        self.feedback_banner.setStyleSheet(
-            "background-color: #1e2238; color: #a8d8ff; font-size: 11px; "
-            "font-weight: bold; padding: 4px 8px; border-radius: 4px; border: 1px solid #354068;"
+        # ── INTERACTIVE TIMING STRIP (Type values directly to jump, trim, extend markup, or hold frame!) ──
+        timing_frame = QFrame()
+        timing_frame.setStyleSheet(
+            "QFrame { background-color: #1e2238; border: 1px solid #354068; border-radius: 5px; }"
+            "QLabel { border: none; background: transparent; color: #a8d8ff; font-size: 11px; font-weight: bold; }"
         )
-        right_panel.addWidget(self.feedback_banner)
+        timing_row = QHBoxLayout(timing_frame)
+        timing_row.setContentsMargins(6, 3, 6, 3)
+        timing_row.setSpacing(4)
 
-        # Scrubber + visual Timeline Map Bar (shows Trim [In..Out], Markup spans, Freeze Hold, Cuts)
+        # 1. Playhead / Jump to second
+        timing_row.addWidget(QLabel("Playhead:"))
+        self.jump_spin = QDoubleSpinBox()
+        self.jump_spin.setDecimals(2)
+        self.jump_spin.setRange(0.0, 99999.0)
+        self.jump_spin.setSingleStep(0.5)
+        self.jump_spin.setSuffix("s")
+        self.jump_spin.setFixedWidth(80)
+        self.jump_spin.setKeyboardTracking(False)
+        self.jump_spin.setToolTip("Type any second and press Enter (or click Go) to jump directly to that part of the video")
+        self.jump_spin.editingFinished.connect(self.jump_to_second)
+        timing_row.addWidget(self.jump_spin)
+        jump_btn = QPushButton("Go")
+        jump_btn.setFixedWidth(40)
+        jump_btn.clicked.connect(self.jump_to_second)
+        timing_row.addWidget(jump_btn)
+
+        timing_row.addSpacing(4)
+
+        # 2. Clip [In → Out]
+        timing_row.addWidget(QLabel("Clip:"))
+        btn_set_in = QPushButton("[ In")
+        btn_set_in.setToolTip("Set Clip In to current playhead (I) — or drag the green '[' line on the timeline")
+        btn_set_in.clicked.connect(self.set_trim_in)
+        timing_row.addWidget(btn_set_in)
+
+        self.in_spin = QDoubleSpinBox()
+        self.in_spin.setRange(0.0, 99999.0)
+        self.in_spin.setDecimals(2)
+        self.in_spin.setSingleStep(0.25)
+        self.in_spin.setSuffix("s")
+        self.in_spin.setFixedWidth(78)
+        self.in_spin.setKeyboardTracking(False)
+        self.in_spin.setToolTip("Clip In time (seconds) — type a value or drag the green '[' line")
+        self.in_spin.valueChanged.connect(self._on_trim_spin_changed)
+        timing_row.addWidget(self.in_spin)
+
+        timing_row.addWidget(QLabel("→"))
+        self.out_spin = QDoubleSpinBox()
+        self.out_spin.setRange(0.0, 99999.0)
+        self.out_spin.setDecimals(2)
+        self.out_spin.setSingleStep(0.25)
+        self.out_spin.setSuffix("s")
+        self.out_spin.setFixedWidth(78)
+        self.out_spin.setKeyboardTracking(False)
+        self.out_spin.setToolTip("Clip Out time (seconds) — type a value or drag the green ']' line")
+        self.out_spin.valueChanged.connect(self._on_trim_spin_changed)
+        timing_row.addWidget(self.out_spin)
+
+        btn_set_out = QPushButton("Out ]")
+        btn_set_out.setToolTip("Set Clip Out to current playhead (O) — or drag the green ']' line on the timeline")
+        btn_set_out.clicked.connect(self.set_trim_out)
+        timing_row.addWidget(btn_set_out)
+
+        btn_reset_trim = QPushButton("Full")
+        btn_reset_trim.setToolTip("Reset In/Out to full video duration")
+        btn_reset_trim.clicked.connect(self.reset_trim_range)
+        timing_row.addWidget(btn_reset_trim)
+
+        timing_row.addSpacing(4)
+
+        # 3. Markup [Start → End] editable spinboxes
+        timing_row.addWidget(QLabel("🖍 Markup:"))
+        self.markup_start_spin = QDoubleSpinBox()
+        self.markup_start_spin.setRange(0.0, 99999.0)
+        self.markup_start_spin.setDecimals(2)
+        self.markup_start_spin.setSingleStep(0.5)
+        self.markup_start_spin.setSuffix("s")
+        self.markup_start_spin.setFixedWidth(76)
+        self.markup_start_spin.setKeyboardTracking(False)
+        self.markup_start_spin.setToolTip("Start time of current/latest markup (type to change when it appears)")
+        self.markup_start_spin.valueChanged.connect(self._on_markup_spin_edited)
+        timing_row.addWidget(self.markup_start_spin)
+
+        timing_row.addWidget(QLabel("→"))
+        self.markup_end_spin = QDoubleSpinBox()
+        self.markup_end_spin.setRange(0.0, 99999.0)
+        self.markup_end_spin.setDecimals(2)
+        self.markup_end_spin.setSingleStep(0.5)
+        self.markup_end_spin.setSuffix("s")
+        self.markup_end_spin.setFixedWidth(76)
+        self.markup_end_spin.setKeyboardTracking(False)
+        self.markup_end_spin.setToolTip("End time of current/latest markup (type a larger second to keep arrow/markup on screen longer)")
+        self.markup_end_spin.valueChanged.connect(self._on_markup_spin_edited)
+        timing_row.addWidget(self.markup_end_spin)
+
+        timing_row.addSpacing(4)
+
+        # 4. Hold Frame toggle + editable @ At + Duration spinboxes
+        self.btn_freeze_here = QPushButton("❄️ Hold")
+        self.btn_freeze_here.setCheckable(True)
+        self.btn_freeze_here.setToolTip("Freeze on the selected frame during exported clip/GIF")
+        self.btn_freeze_here.toggled.connect(self._toggle_freeze_point)
+        timing_row.addWidget(self.btn_freeze_here)
+
+        timing_row.addWidget(QLabel("@"))
+        self.freeze_at_spin = QDoubleSpinBox()
+        self.freeze_at_spin.setRange(0.0, 99999.0)
+        self.freeze_at_spin.setDecimals(2)
+        self.freeze_at_spin.setSingleStep(0.5)
+        self.freeze_at_spin.setSuffix("s")
+        self.freeze_at_spin.setFixedWidth(74)
+        self.freeze_at_spin.setKeyboardTracking(False)
+        self.freeze_at_spin.setToolTip("Video timecode where Hold Frame pauses (type or drag cyan bar)")
+        self.freeze_at_spin.valueChanged.connect(self._on_freeze_at_spin_edited)
+        timing_row.addWidget(self.freeze_at_spin)
+
+        timing_row.addWidget(QLabel("+"))
+        self.freeze_dur_spin = QDoubleSpinBox()
+        self.freeze_dur_spin.setRange(0.5, 30.0)
+        self.freeze_dur_spin.setSingleStep(0.5)
+        self.freeze_dur_spin.setValue(3.0)
+        self.freeze_dur_spin.setSuffix("s")
+        self.freeze_dur_spin.setFixedWidth(74)
+        self.freeze_dur_spin.setKeyboardTracking(False)
+        self.freeze_dur_spin.setToolTip("How many seconds to hold the frozen frame")
+        self.freeze_dur_spin.valueChanged.connect(self._update_timeline_feedback)
+        timing_row.addWidget(self.freeze_dur_spin)
+
+        timing_row.addStretch()
+        right_panel.addWidget(timing_frame)
+
+        # Scrubber + Interactive Timeline Map Bar (drag green In/Out lines, Markup spans, or Hold Frame!)
         self.frame_slider = QSlider(Qt.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.setMaximum(0)
@@ -1017,27 +1187,27 @@ class VideoFrameCapture(QMainWindow):
         right_panel.addWidget(self.frame_slider)
 
         self.timeline_bar = TimelineMapBar(self)
+        self.timeline_bar.trim_in_changed.connect(self._on_timeline_drag_in)
+        self.timeline_bar.trim_out_changed.connect(self._on_timeline_drag_out)
+        self.timeline_bar.playhead_scrubbed.connect(self._on_timeline_scrub)
+        self.timeline_bar.markup_span_changed.connect(self._on_timeline_markup_span)
+        self.timeline_bar.freeze_moved.connect(self._on_timeline_freeze_moved)
         right_panel.addWidget(self.timeline_bar)
 
-        # Timecode row
-        tc_row = QHBoxLayout()
+        # Combined Timecode + Transport + Nav + Format row (compact single line!)
+        tc_nav_row = QHBoxLayout()
+        tc_nav_row.setSpacing(4)
         self.time_label = QLabel("00:00.000 / 00:00.000")
         self.time_label.setStyleSheet("font-family: monospace; font-size: 12px;")
-        tc_row.addWidget(self.time_label)
-        tc_row.addStretch()
-        self.btn_play = QPushButton("▶  Play")
-        self.btn_play.setFixedWidth(90)
-        self.btn_play.setEnabled(False)
-        self.btn_play.setToolTip("Play / Pause  (Space)")
-        self.btn_play.clicked.connect(self.toggle_play)
-        tc_row.addWidget(self.btn_play)
-        self.frame_label = QLabel("Frame: 0 / 0")
-        self.frame_label.setStyleSheet("font-family: monospace; font-size: 12px;")
-        tc_row.addWidget(self.frame_label)
-        right_panel.addLayout(tc_row)
+        tc_nav_row.addWidget(self.time_label)
 
-        # Nav buttons
-        nav = QHBoxLayout()
+        self.btn_play = QPushButton("▶  Play")
+        self.btn_play.setFixedWidth(86)
+        self.btn_play.setEnabled(False)
+        self.btn_play.setToolTip("Play / Pause (Space)  ·  Shuttle: J (Rev up to -16x) / K (Pause) / L (Fwd up to 16x)")
+        self.btn_play.clicked.connect(self.toggle_play)
+        tc_nav_row.addWidget(self.btn_play)
+
         for label, fn in [
             ("⏪ -10s", lambda: self.seek_relative(-10)),
             ("◀ -1s",  lambda: self.seek_relative(-1)),
@@ -1048,179 +1218,416 @@ class VideoFrameCapture(QMainWindow):
         ]:
             b = QPushButton(label)
             b.clicked.connect(fn)
-            nav.addWidget(b)
-        right_panel.addLayout(nav)
+            tc_nav_row.addWidget(b)
 
-        # Jump row
-        jump_row = QHBoxLayout()
-        jump_row.addWidget(QLabel("Jump to second:"))
-        self.jump_spin = QDoubleSpinBox()
-        self.jump_spin.setDecimals(2)
-        self.jump_spin.setMinimum(0)
-        self.jump_spin.setMaximum(99999)
-        self.jump_spin.setSingleStep(0.5)
-        self.jump_spin.setFixedWidth(80)
-        jump_row.addWidget(self.jump_spin)
-        jump_btn = QPushButton("Go")
-        jump_btn.setFixedWidth(44)
-        jump_btn.clicked.connect(self.jump_to_second)
-        jump_row.addWidget(jump_btn)
-        jump_row.addStretch()
-        right_panel.addLayout(jump_row)
+        tc_nav_row.addStretch()
+        self.frame_label = QLabel("Frame: 0 / 0")
+        self.frame_label.setStyleSheet("font-family: monospace; font-size: 12px;")
+        tc_nav_row.addWidget(self.frame_label)
 
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        right_panel.addWidget(sep)
-
-        # ── OUTPUT FORMAT ROW ─────────────────────────────────────────────────
-        fmt_row = QHBoxLayout()
-        fmt_row.addWidget(QLabel("Format:"))
+        tc_nav_row.addSpacing(8)
+        tc_nav_row.addWidget(QLabel("Still Format:"))
         self.fmt_combo = QComboBox()
         self.fmt_combo.addItems(["PNG", "JPEG", "TIFF"])
-        self.fmt_combo.setFixedWidth(80)
+        self.fmt_combo.setFixedWidth(70)
         self.fmt_combo.currentTextChanged.connect(self._on_format_changed)
-        fmt_row.addWidget(self.fmt_combo)
-        self.quality_label = QLabel("Quality:")
+        tc_nav_row.addWidget(self.fmt_combo)
+        self.quality_label = QLabel("Q:")
         self.quality_label.setVisible(False)
-        fmt_row.addWidget(self.quality_label)
+        tc_nav_row.addWidget(self.quality_label)
         self.quality_slider = QSlider(Qt.Horizontal)
         self.quality_slider.setMinimum(1)
         self.quality_slider.setMaximum(100)
         self.quality_slider.setValue(92)
-        self.quality_slider.setFixedWidth(120)
+        self.quality_slider.setFixedWidth(80)
         self.quality_slider.setVisible(False)
         self.quality_slider.valueChanged.connect(
             lambda v: self.quality_val_label.setText(str(v)))
-        fmt_row.addWidget(self.quality_slider)
+        tc_nav_row.addWidget(self.quality_slider)
         self.quality_val_label = QLabel("92")
-        self.quality_val_label.setFixedWidth(28)
+        self.quality_val_label.setFixedWidth(24)
         self.quality_val_label.setVisible(False)
-        fmt_row.addWidget(self.quality_val_label)
-        fmt_row.addStretch()
+        tc_nav_row.addWidget(self.quality_val_label)
+
         sheet_btn = QPushButton("Contact Sheet…")
         sheet_btn.setToolTip(
             "Preview batch timecode frames, or a folder of saved pictures, and print one PDF")
         sheet_btn.clicked.connect(self.open_contact_sheet)
-        fmt_row.addWidget(sheet_btn)
-        right_panel.addLayout(fmt_row)
+        tc_nav_row.addWidget(sheet_btn)
+        right_panel.addLayout(tc_nav_row)
 
-        # ── MODE TABS (Frame Capture vs. Edit / Trim / GIF / Captions Studio) ──
+        # ── MODE TABS (Tab 0: Edit / Export / Chapters / Dub VO / Captions, Tab 1: Still Frame Capture) ──
         self.mode_tabs = QTabWidget()
+        self.mode_tabs.setMaximumHeight(225)
 
-        # Tab 1: Frame Capture
+        # TAB 0: Edit, Export (MP4 Quality / MP3 / GIF), QuickTime Chapters, Dub VO & Auto-Captions
+        edit_tab = QWidget()
+        edit_tab_lay = QHBoxLayout(edit_tab)
+        edit_tab_lay.setContentsMargins(6, 4, 6, 4)
+        edit_tab_lay.setSpacing(6)
+
+        # Column 1: Export MP4 (Quality) / MP3 (Bitrate) / GIF & Fades
+        trim_grp = QGroupBox("Export MP4 / MP3 / GIF && Fades")
+        trim_lay = QVBoxLayout(trim_grp)
+        trim_lay.setSpacing(4)
+        trim_lay.setContentsMargins(6, 8, 6, 6)
+
+        qual_row = QHBoxLayout()
+        qual_row.setSpacing(4)
+        qual_row.addWidget(QLabel("MP4 Quality:"))
+        self.mp4_quality_combo = QComboBox()
+        self.mp4_quality_combo.addItem("High (Original / 1080p)", "high")
+        self.mp4_quality_combo.addItem("Medium (720p)", "medium")
+        self.mp4_quality_combo.addItem("Small / Fast (480p)", "small")
+        self.mp4_quality_combo.setToolTip("Select resolution & bitrate quality when saving MP4 clips or split segments")
+        qual_row.addWidget(self.mp4_quality_combo, stretch=1)
+        trim_lay.addLayout(qual_row)
+
+        aud_fade_row = QHBoxLayout()
+        aud_fade_row.setSpacing(4)
+        aud_fade_row.addWidget(QLabel("MP3:"))
+        self.mp3_bitrate_combo = QComboBox()
+        self.mp3_bitrate_combo.addItem("320 kbps", "320k")
+        self.mp3_bitrate_combo.addItem("192 kbps", "192k")
+        self.mp3_bitrate_combo.addItem("128 kbps", "128k")
+        self.mp3_bitrate_combo.addItem("WAV", "wav")
+        self.mp3_bitrate_combo.setFixedWidth(96)
+        self.mp3_bitrate_combo.setToolTip("Audio format/bitrate for '🎵 Save MP3'")
+        aud_fade_row.addWidget(self.mp3_bitrate_combo)
+
+        aud_fade_row.addWidget(QLabel("Fade:"))
+        self.fade_in_spin = QDoubleSpinBox()
+        self.fade_in_spin.setRange(0.0, 10.0)
+        self.fade_in_spin.setSingleStep(0.5)
+        self.fade_in_spin.setValue(0.0)
+        self.fade_in_spin.setSuffix("s")
+        self.fade_in_spin.setFixedWidth(74)
+        self.fade_in_spin.setToolTip("Fade In duration (seconds)")
+        aud_fade_row.addWidget(self.fade_in_spin)
+
+        aud_fade_row.addWidget(QLabel("/"))
+        self.fade_out_spin = QDoubleSpinBox()
+        self.fade_out_spin.setRange(0.0, 10.0)
+        self.fade_out_spin.setSingleStep(0.5)
+        self.fade_out_spin.setValue(0.0)
+        self.fade_out_spin.setSuffix("s")
+        self.fade_out_spin.setFixedWidth(74)
+        self.fade_out_spin.setToolTip("Fade Out duration (seconds)")
+        aud_fade_row.addWidget(self.fade_out_spin)
+        aud_fade_row.addStretch()
+        trim_lay.addLayout(aud_fade_row)
+
+        gif_row = QHBoxLayout()
+        gif_row.setSpacing(4)
+        gif_row.addWidget(QLabel("GIF FPS:"))
+        self.gif_fps_combo = QComboBox()
+        for fps_val in (10, 12, 15, 24):
+            self.gif_fps_combo.addItem(f"{fps_val} fps", fps_val)
+        self.gif_fps_combo.setCurrentIndex(1)
+        gif_row.addWidget(self.gif_fps_combo)
+        gif_row.addWidget(QLabel("GIF Size:"))
+        self.gif_width_combo = QComboBox()
+        for label, w_val in [("480 px", 480), ("640 px", 640), ("720 px", 720), ("Original", 0)]:
+            self.gif_width_combo.addItem(label, w_val)
+        gif_row.addWidget(self.gif_width_combo)
+        gif_row.addStretch()
+        trim_lay.addLayout(gif_row)
+
+        exp_row = QHBoxLayout()
+        exp_row.setSpacing(4)
+        self.btn_export_mp4 = QPushButton("🎬 Save MP4")
+        self.btn_export_mp4.setMinimumHeight(32)
+        self.btn_export_mp4.setStyleSheet(
+            "background-color: #1e5c3a; color: white; font-weight: bold; border-radius: 5px; border: none; padding: 3px 6px;"
+        )
+        self.btn_export_mp4.setToolTip("Export [In → Out] clip with Markup, Hold Frame, Dub VO, Captions & selected MP4 Quality")
+        self.btn_export_mp4.clicked.connect(lambda: self.export_edited_clip(as_gif=False))
+        exp_row.addWidget(self.btn_export_mp4)
+
+        self.btn_export_audio = QPushButton("🎵 Save MP3")
+        self.btn_export_audio.setMinimumHeight(32)
+        self.btn_export_audio.setStyleSheet(
+            "background-color: #6c3483; color: white; font-weight: bold; border-radius: 5px; border: none; padding: 3px 6px;"
+        )
+        self.btn_export_audio.setToolTip("1-Click save audio only (MP3/WAV) for [In → Out] directly to Output Folder")
+        self.btn_export_audio.clicked.connect(self.export_trimmed_audio)
+        exp_row.addWidget(self.btn_export_audio)
+
+        self.btn_export_gif = QPushButton("🎞 Save GIF")
+        self.btn_export_gif.setMinimumHeight(32)
+        self.btn_export_gif.setStyleSheet(
+            "background-color: #1a3d6e; color: white; font-weight: bold; border-radius: 5px; border: none; padding: 3px 6px;"
+        )
+        self.btn_export_gif.clicked.connect(lambda: self.export_edited_clip(as_gif=True))
+        exp_row.addWidget(self.btn_export_gif)
+        trim_lay.addLayout(exp_row)
+        edit_tab_lay.addWidget(trim_grp, stretch=11)
+
+        # Column 2: Scene Cuts, QuickTime MP4 Chapters & Splitter (respects [In → Out]!)
+        cuts_grp = QGroupBox("Scene Cuts, Chapters && Splitter")
+        cuts_lay = QVBoxLayout(cuts_grp)
+        cuts_lay.setSpacing(3)
+        cuts_lay.setContentsMargins(6, 8, 6, 6)
+
+        cuts_top = QHBoxLayout()
+        cuts_top.setSpacing(4)
+        btn_find_cuts = QPushButton("🔍 Detect Cuts")
+        btn_find_cuts.setToolTip("Auto-detect scene cuts strictly within [Clip In → Out]")
+        btn_find_cuts.clicked.connect(self.detect_cuts_for_current)
+        cuts_top.addWidget(btn_find_cuts)
+        btn_prev_cut = QPushButton("◀ Cut")
+        btn_prev_cut.clicked.connect(lambda: self.jump_cut(-1))
+        cuts_top.addWidget(btn_prev_cut)
+        btn_next_cut = QPushButton("Cut ▶")
+        btn_next_cut.clicked.connect(lambda: self.jump_cut(1))
+        cuts_top.addWidget(btn_next_cut)
+        cuts_lay.addLayout(cuts_top)
+
+        self.cuts_list = QListWidget()
+        self.cuts_list.setMaximumHeight(50)
+        self.cuts_list.setToolTip(
+            "Click a cut/chapter to preview; double-click or click '✏️ Name' to title the chapter"
+        )
+        self.cuts_list.currentRowChanged.connect(self._on_cut_selected)
+        self.cuts_list.itemDoubleClicked.connect(lambda _item: self.rename_selected_chapter())
+        cuts_lay.addWidget(self.cuts_list)
+
+        cuts_adj = QHBoxLayout()
+        cuts_adj.setSpacing(4)
+        btn_add_cut = QPushButton("+ Add Cut")
+        btn_add_cut.clicked.connect(self.add_cut_at_current)
+        cuts_adj.addWidget(btn_add_cut)
+        btn_nudge_cut = QPushButton("↔ Move")
+        btn_nudge_cut.setToolTip("Move selected cut/chapter point to current scrubber frame")
+        btn_nudge_cut.clicked.connect(self.move_selected_cut_to_current)
+        cuts_adj.addWidget(btn_nudge_cut)
+        btn_name_cut = QPushButton("✏️ Name")
+        btn_name_cut.setToolTip("Set a custom chapter title for the selected cut point")
+        btn_name_cut.clicked.connect(self.rename_selected_chapter)
+        cuts_adj.addWidget(btn_name_cut)
+        btn_del_cut = QPushButton("Del")
+        btn_del_cut.clicked.connect(self.remove_selected_cut)
+        cuts_adj.addWidget(btn_del_cut)
+        cuts_lay.addLayout(cuts_adj)
+
+        cuts_export_row = QHBoxLayout()
+        cuts_export_row.setSpacing(4)
+        btn_save_chapters = QPushButton("📑 MP4 + Chapters")
+        btn_save_chapters.setMinimumHeight(32)
+        btn_save_chapters.setToolTip(
+            "Save [In → Out] MP4 with QuickTime Player, VLC & YouTube chapter markers"
+        )
+        btn_save_chapters.setStyleSheet(
+            "background-color: #1e5c3a; color: white; font-weight: bold; border-radius: 5px; border: none; padding: 3px 6px;"
+        )
+        btn_save_chapters.clicked.connect(self.export_current_video_with_chapters)
+        cuts_export_row.addWidget(btn_save_chapters)
+
+        btn_split_segs = QPushButton("✂️ Split into Clips")
+        btn_split_segs.setMinimumHeight(32)
+        btn_split_segs.setToolTip(
+            "Split [In → Out] at each scene cut into separate MP4 clips in <video>_segments/"
+        )
+        btn_split_segs.setStyleSheet(
+            "background-color: #1a3d6e; color: white; font-weight: bold; border-radius: 5px; border: none; padding: 3px 6px;"
+        )
+        btn_split_segs.clicked.connect(self.split_current_video_by_cuts)
+        cuts_export_row.addWidget(btn_split_segs)
+        cuts_lay.addLayout(cuts_export_row)
+        edit_tab_lay.addWidget(cuts_grp, stretch=10)
+
+        # Column 3: Dub / Voiceover Recording & Offline Whisper Auto-Captions
+        narr_grp = QGroupBox("🎙 Dub Recording && 💬 Auto-Captions")
+        narr_lay = QVBoxLayout(narr_grp)
+        narr_lay.setSpacing(3)
+        narr_lay.setContentsMargins(6, 8, 6, 6)
+
+        narr_top_row = QHBoxLayout()
+        narr_top_row.setSpacing(4)
+        self.mic_device_combo = QComboBox()
+        self.mic_device_combo.setToolTip("Select microphone or audio input device for Dub / Voiceover recording")
+        self._populate_mic_devices()
+        narr_top_row.addWidget(self.mic_device_combo, stretch=1)
+
+        self.narr_mode_combo = QComboBox()
+        self.narr_mode_combo.addItem("Duck Video 20%", "duck")
+        self.narr_mode_combo.addItem("Replace Audio", "replace")
+        self.narr_mode_combo.addItem("Mix 100%", "mix")
+        narr_top_row.addWidget(self.narr_mode_combo)
+        narr_lay.addLayout(narr_top_row)
+
+        narr_btn_row = QHBoxLayout()
+        narr_btn_row.setSpacing(4)
+        self.btn_rec_mic = QPushButton("🎙 Dub Record")
+        self.btn_rec_mic.setCheckable(True)
+        self.btn_rec_mic.setStyleSheet(
+            "QPushButton { background-color: #7b241c; color: white; font-weight: bold; border-radius: 4px; padding: 3px 6px; }"
+            "QPushButton:checked { background-color: #e74c3c; color: white; border: 1px solid #ffffff; }"
+        )
+        self.btn_rec_mic.setToolTip("Record live dub / voiceover while watching the video play")
+        self.btn_rec_mic.toggled.connect(self.toggle_mic_recording)
+        narr_btn_row.addWidget(self.btn_rec_mic)
+
+        self.btn_play_dub = QPushButton("🔊 Play")
+        self.btn_play_dub.setToolTip("Preview recorded or loaded dub audio")
+        self.btn_play_dub.clicked.connect(self.preview_dub_audio)
+        narr_btn_row.addWidget(self.btn_play_dub)
+
+        btn_load_narr = QPushButton("📂 Load")
+        btn_load_narr.setToolTip("Load an external audio file (.wav, .mp3, .m4a) as dub track")
+        btn_load_narr.clicked.connect(self.choose_narration_file)
+        narr_btn_row.addWidget(btn_load_narr)
+
+        btn_clear_narr = QPushButton("✕")
+        btn_clear_narr.setFixedWidth(26)
+        btn_clear_narr.setToolTip("Clear dub / narration audio")
+        btn_clear_narr.clicked.connect(self.clear_narration)
+        narr_btn_row.addWidget(btn_clear_narr)
+        narr_lay.addLayout(narr_btn_row)
+
+        self.narr_label = QLabel("Dub: None  ·  Subtitles below:")
+        self.narr_label.setStyleSheet("color: #8888aa; font-size: 10px;")
+        narr_lay.addWidget(self.narr_label)
+
+        cap_btn_row = QHBoxLayout()
+        cap_btn_row.setSpacing(4)
+        self.btn_auto_cap = QPushButton("💬 Captions AI")
+        self.btn_auto_cap.setStyleSheet(
+            "background-color: #1a3d6e; color: white; font-weight: bold; border-radius: 4px; padding: 3px 6px;"
+        )
+        self.btn_auto_cap.setToolTip("Generate timed subtitles offline using bundled Whisper AI")
+        self.btn_auto_cap.clicked.connect(self.auto_transcribe_captions)
+        cap_btn_row.addWidget(self.btn_auto_cap)
+
+        self.auto_cap_on_load_chk = QCheckBox("Auto")
+        self.auto_cap_on_load_chk.setToolTip("Automatically transcribe subtitles when a video is opened")
+        cap_btn_row.addWidget(self.auto_cap_on_load_chk)
+
+        btn_add_cap = QPushButton("+ Sub")
+        btn_add_cap.setToolTip("Add a manual subtitle at current playhead")
+        btn_add_cap.clicked.connect(self.add_manual_caption)
+        cap_btn_row.addWidget(btn_add_cap)
+
+        btn_srt = QPushButton("SRT")
+        btn_srt.setToolTip("Load or export .srt subtitle file")
+        btn_srt.clicked.connect(self.manage_srt_menu)
+        cap_btn_row.addWidget(btn_srt)
+
+        btn_clear_cap = QPushButton("Clear")
+        btn_clear_cap.clicked.connect(self.clear_captions)
+        cap_btn_row.addWidget(btn_clear_cap)
+        narr_lay.addLayout(cap_btn_row)
+
+        self.caption_list = QListWidget()
+        self.caption_list.setMaximumHeight(44)
+        self.caption_list.setToolTip("Click a caption to jump to it; double-click to edit its text")
+        self.caption_list.currentRowChanged.connect(self._on_caption_selected)
+        self.caption_list.itemDoubleClicked.connect(lambda _item: self.edit_selected_caption())
+        narr_lay.addWidget(self.caption_list)
+
+        edit_tab_lay.addWidget(narr_grp, stretch=11)
+        self.mode_tabs.addTab(edit_tab, "🎬 Edit, Export (MP4 / MP3 / GIF), Chapters, Dub && Captions   ")
+
+        # TAB 1: Still Frame Capture (Single horizontal row of 4 cards — zero squishing!)
         capture_tab = QWidget()
-        capture_tab_lay = QVBoxLayout(capture_tab)
-        capture_tab_lay.setContentsMargins(6, 6, 6, 6)
-        capture_tab_lay.setSpacing(6)
+        capture_row = QHBoxLayout(capture_tab)
+        capture_row.setContentsMargins(6, 4, 6, 4)
+        capture_row.setSpacing(8)
 
-        # ── CAPTURE CONTROLS ──────────────────────────────────────────────────
-        capture_row = QHBoxLayout()
-
-        # Single capture
-        single_grp = QGroupBox("Single Capture")
-        single_lay = QVBoxLayout()
+        # Card 1: Single Capture
+        single_grp = QGroupBox("Single Frame")
+        single_lay = QVBoxLayout(single_grp)
+        single_lay.setSpacing(4)
         self.btn_capture = QPushButton("📸  Capture This Frame")
-        self.btn_capture.setMinimumHeight(42)
+        self.btn_capture.setMinimumHeight(38)
         self.btn_capture.setStyleSheet(
             "background-color: #1e5c3a; color: white; font-weight: bold; "
             "font-size: 13px; border-radius: 5px; border: none;")
-        self.btn_capture.setToolTip("Capture current frame  (Cmd+S)")
+        self.btn_capture.setToolTip("Capture current frame into <video>_frames/ subfolder (Cmd+S)")
         self.btn_capture.clicked.connect(self.capture_single)
         single_lay.addWidget(self.btn_capture)
-        single_grp.setLayout(single_lay)
-        capture_row.addWidget(single_grp)
+        capture_row.addWidget(single_grp, stretch=9)
 
-        # Batch capture
-        batch_grp = QGroupBox("Batch Capture (All Videos in Folder)")
-        batch_lay = QVBoxLayout()
-        batch_lay.setSpacing(4)
-
-        # Timecode list
+        # Card 2: Batch Capture
+        batch_grp = QGroupBox("Batch Timecodes (All Videos)")
+        batch_lay = QVBoxLayout(batch_grp)
+        batch_lay.setSpacing(3)
         tc_list_row = QHBoxLayout()
         self.timecode_list = QListWidget()
-        self.timecode_list.setMaximumHeight(70)
+        self.timecode_list.setMaximumHeight(48)
         self.timecode_list.setToolTip("Timecodes to extract from each video")
-        tc_list_row.addWidget(self.timecode_list)
+        tc_list_row.addWidget(self.timecode_list, stretch=1)
 
         tc_btn_col = QVBoxLayout()
+        tc_btn_col.setSpacing(2)
         self.batch_spin = QDoubleSpinBox()
         self.batch_spin.setDecimals(2)
-        self.batch_spin.setMinimum(0)
-        self.batch_spin.setMaximum(99999)
+        self.batch_spin.setRange(0, 99999)
         self.batch_spin.setSingleStep(0.5)
-        self.batch_spin.setFixedWidth(80)
+        self.batch_spin.setFixedWidth(82)
         tc_btn_col.addWidget(self.batch_spin)
+        tc_add_del = QHBoxLayout()
         add_tc_btn = QPushButton("+ Add")
-        add_tc_btn.setFixedWidth(64)
         add_tc_btn.clicked.connect(self._add_timecode)
-        tc_btn_col.addWidget(add_tc_btn)
-        del_tc_btn = QPushButton("Remove")
-        del_tc_btn.setFixedWidth(64)
+        tc_add_del.addWidget(add_tc_btn)
+        del_tc_btn = QPushButton("Del")
         del_tc_btn.clicked.connect(self._remove_timecode)
-        tc_btn_col.addWidget(del_tc_btn)
+        tc_add_del.addWidget(del_tc_btn)
+        tc_btn_col.addLayout(tc_add_del)
         tc_list_row.addLayout(tc_btn_col)
         batch_lay.addLayout(tc_list_row)
 
-        use_tc_btn = QPushButton("← Use Current Frame")
+        batch_bot_row = QHBoxLayout()
+        use_tc_btn = QPushButton("← Playhead")
         use_tc_btn.setToolTip("Set timecode input to current scrubber position")
         use_tc_btn.clicked.connect(self.use_current_timecode)
         self.btn_use_timecode = use_tc_btn
-        batch_lay.addWidget(use_tc_btn)
+        batch_bot_row.addWidget(use_tc_btn)
 
-        self.btn_batch = QPushButton("⚡  Batch Capture All Videos")
-        self.btn_batch.setMinimumHeight(42)
+        self.btn_batch = QPushButton("⚡ Batch All")
+        self.btn_batch.setMinimumHeight(30)
         self.btn_batch.setStyleSheet(
             "background-color: #1a3d6e; color: white; font-weight: bold; "
-            "font-size: 13px; border-radius: 5px; border: none;")
+            "border-radius: 5px; border: none;")
         self.btn_batch.clicked.connect(self.capture_batch)
-        batch_lay.addWidget(self.btn_batch)
-        batch_grp.setLayout(batch_lay)
-        capture_row.addWidget(batch_grp)
+        batch_bot_row.addWidget(self.btn_batch)
+        batch_lay.addLayout(batch_bot_row)
+        capture_row.addWidget(batch_grp, stretch=12)
 
-        capture_tab_lay.addLayout(capture_row)
-
-        # ── SECOND CAPTURE ROW: Interval + Scene ──────────────────────────────
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        capture_tab_lay.addWidget(sep2)
-
-        capture_row2 = QHBoxLayout()
-
-        # Interval Capture
-        interval_grp = QGroupBox("Interval Capture")
-        interval_lay = QVBoxLayout()
+        # Card 3: Interval Capture
+        interval_grp = QGroupBox("Interval Capture (In→Out)")
+        interval_lay = QVBoxLayout(interval_grp)
         interval_lay.setSpacing(4)
         ivl_top = QHBoxLayout()
         ivl_top.addWidget(QLabel("Every:"))
         self.interval_spin = QDoubleSpinBox()
         self.interval_spin.setDecimals(1)
-        self.interval_spin.setMinimum(0.1)
-        self.interval_spin.setMaximum(3600)
+        self.interval_spin.setRange(0.1, 3600)
         self.interval_spin.setValue(3.0)
         self.interval_spin.setSingleStep(0.5)
         self.interval_spin.setSuffix(" sec")
-        self.interval_spin.setFixedWidth(90)
+        self.interval_spin.setFixedWidth(92)
         ivl_top.addWidget(self.interval_spin)
         ivl_top.addStretch()
         interval_lay.addLayout(ivl_top)
-        btn_ivl_single = QPushButton("⏱  This Video")
-        btn_ivl_single.setMinimumHeight(34)
+        ivl_btns = QHBoxLayout()
+        btn_ivl_single = QPushButton("⏱ This Video")
+        btn_ivl_single.setMinimumHeight(32)
         btn_ivl_single.clicked.connect(self.capture_interval_single)
-        interval_lay.addWidget(btn_ivl_single)
-        btn_ivl_batch = QPushButton("⏱  All Videos")
-        btn_ivl_batch.setMinimumHeight(34)
+        ivl_btns.addWidget(btn_ivl_single)
+        btn_ivl_batch = QPushButton("⏱ All Videos")
+        btn_ivl_batch.setMinimumHeight(32)
         btn_ivl_batch.setStyleSheet(
             "background-color: #1a3d6e; color: white; font-weight: bold; "
             "border-radius: 5px; border: none;")
         btn_ivl_batch.clicked.connect(self.capture_interval_batch)
-        interval_lay.addWidget(btn_ivl_batch)
-        interval_grp.setLayout(interval_lay)
-        capture_row2.addWidget(interval_grp)
+        ivl_btns.addWidget(btn_ivl_batch)
+        interval_lay.addLayout(ivl_btns)
+        capture_row.addWidget(interval_grp, stretch=10)
 
-        # Scene Capture
-        scene_grp = QGroupBox("Scene Capture")
-        scene_lay = QVBoxLayout()
+        # Card 4: Scene Capture
+        scene_grp = QGroupBox("Scene Capture (In→Out)")
+        scene_lay = QVBoxLayout(scene_grp)
         scene_lay.setSpacing(4)
         thresh_row = QHBoxLayout()
         thresh_row.addWidget(QLabel("Sensitivity:"))
@@ -1235,259 +1642,22 @@ class VideoFrameCapture(QMainWindow):
         self.scene_thresh_label.setFixedWidth(34)
         thresh_row.addWidget(self.scene_thresh_label)
         scene_lay.addLayout(thresh_row)
-        btn_scene_single = QPushButton("🎬  This Video")
-        btn_scene_single.setMinimumHeight(34)
+        scene_btns = QHBoxLayout()
+        btn_scene_single = QPushButton("🎬 This Video")
+        btn_scene_single.setMinimumHeight(32)
         btn_scene_single.clicked.connect(self.capture_scenes_single)
-        scene_lay.addWidget(btn_scene_single)
-        btn_scene_batch = QPushButton("🎬  All Videos")
-        btn_scene_batch.setMinimumHeight(34)
+        scene_btns.addWidget(btn_scene_single)
+        btn_scene_batch = QPushButton("🎬 All Videos")
+        btn_scene_batch.setMinimumHeight(32)
         btn_scene_batch.setStyleSheet(
             "background-color: #1a3d6e; color: white; font-weight: bold; "
             "border-radius: 5px; border: none;")
         btn_scene_batch.clicked.connect(self.capture_scenes_batch)
-        scene_lay.addWidget(btn_scene_batch)
-        scene_grp.setLayout(scene_lay)
-        capture_row2.addWidget(scene_grp)
+        scene_btns.addWidget(btn_scene_batch)
+        scene_lay.addLayout(scene_btns)
+        capture_row.addWidget(scene_grp, stretch=10)
 
-        capture_tab_lay.addLayout(capture_row2)
-        self.mode_tabs.addTab(capture_tab, "📸  Frame Capture")
-
-        # Tab 2: Edit, Trim, GIF, Cut Splitter, Narration & Captions
-        edit_tab = QWidget()
-        edit_tab_lay = QHBoxLayout(edit_tab)
-        edit_tab_lay.setContentsMargins(6, 6, 6, 6)
-        edit_tab_lay.setSpacing(8)
-
-        # Left column of Edit Studio: Trim, Fades, Export MP4 / GIF / Audio
-        trim_grp = QGroupBox("Trim, Fade & Export (MP4 / GIF / Audio)")
-        trim_lay = QVBoxLayout(trim_grp)
-        trim_lay.setSpacing(5)
-
-        in_out_row = QHBoxLayout()
-        btn_set_in = QPushButton("[ Set In")
-        btn_set_in.setToolTip("Set clip start to current playhead (I)")
-        btn_set_in.clicked.connect(self.set_trim_in)
-        in_out_row.addWidget(btn_set_in)
-        self.in_spin = QDoubleSpinBox()
-        self.in_spin.setRange(0, 99999)
-        self.in_spin.setDecimals(2)
-        self.in_spin.setSuffix("s")
-        self.in_spin.setFixedWidth(78)
-        self.in_spin.valueChanged.connect(self._on_trim_spin_changed)
-        in_out_row.addWidget(self.in_spin)
-
-        btn_set_out = QPushButton("Set Out ]")
-        btn_set_out.setToolTip("Set clip end to current playhead (O)")
-        btn_set_out.clicked.connect(self.set_trim_out)
-        in_out_row.addWidget(btn_set_out)
-        self.out_spin = QDoubleSpinBox()
-        self.out_spin.setRange(0, 99999)
-        self.out_spin.setDecimals(2)
-        self.out_spin.setSuffix("s")
-        self.out_spin.setFixedWidth(78)
-        self.out_spin.valueChanged.connect(self._on_trim_spin_changed)
-        in_out_row.addWidget(self.out_spin)
-
-        btn_reset_trim = QPushButton("Full Clip")
-        btn_reset_trim.clicked.connect(self.reset_trim_range)
-        in_out_row.addWidget(btn_reset_trim)
-        trim_lay.addLayout(in_out_row)
-
-        fade_row = QHBoxLayout()
-        fade_row.addWidget(QLabel("Fade In:"))
-        self.fade_in_spin = QDoubleSpinBox()
-        self.fade_in_spin.setRange(0.0, 10.0)
-        self.fade_in_spin.setSingleStep(0.5)
-        self.fade_in_spin.setValue(0.0)
-        self.fade_in_spin.setSuffix("s")
-        self.fade_in_spin.setFixedWidth(64)
-        fade_row.addWidget(self.fade_in_spin)
-        fade_row.addWidget(QLabel("Fade Out:"))
-        self.fade_out_spin = QDoubleSpinBox()
-        self.fade_out_spin.setRange(0.0, 10.0)
-        self.fade_out_spin.setSingleStep(0.5)
-        self.fade_out_spin.setValue(0.0)
-        self.fade_out_spin.setSuffix("s")
-        self.fade_out_spin.setFixedWidth(64)
-        fade_row.addWidget(self.fade_out_spin)
-        fade_row.addStretch()
-        trim_lay.addLayout(fade_row)
-
-        gif_row = QHBoxLayout()
-        gif_row.addWidget(QLabel("GIF FPS:"))
-        self.gif_fps_combo = QComboBox()
-        for fps_val in (10, 12, 15, 24):
-            self.gif_fps_combo.addItem(f"{fps_val} fps", fps_val)
-        self.gif_fps_combo.setCurrentIndex(1)
-        gif_row.addWidget(self.gif_fps_combo)
-        gif_row.addWidget(QLabel("Width:"))
-        self.gif_width_combo = QComboBox()
-        for label, w_val in [("480 px", 480), ("640 px", 640), ("720 px", 720), ("Original", 0)]:
-            self.gif_width_combo.addItem(label, w_val)
-        gif_row.addWidget(self.gif_width_combo)
-        gif_row.addStretch()
-        trim_lay.addLayout(gif_row)
-
-        exp_row = QHBoxLayout()
-        self.btn_export_mp4 = QPushButton("🎬 Export Trim (MP4)")
-        self.btn_export_mp4.setMinimumHeight(34)
-        self.btn_export_mp4.setStyleSheet(
-            "background-color: #1e5c3a; color: white; font-weight: bold; border-radius: 5px; border: none;"
-        )
-        self.btn_export_mp4.clicked.connect(lambda: self.export_edited_clip(as_gif=False))
-        exp_row.addWidget(self.btn_export_mp4)
-
-        self.btn_export_gif = QPushButton("🎞 Export GIF")
-        self.btn_export_gif.setMinimumHeight(34)
-        self.btn_export_gif.setStyleSheet(
-            "background-color: #1a3d6e; color: white; font-weight: bold; border-radius: 5px; border: none;"
-        )
-        self.btn_export_gif.clicked.connect(lambda: self.export_edited_clip(as_gif=True))
-        exp_row.addWidget(self.btn_export_gif)
-
-        self.btn_export_audio = QPushButton("🎵 Export Audio")
-        self.btn_export_audio.setMinimumHeight(34)
-        self.btn_export_audio.clicked.connect(self.export_trimmed_audio)
-        exp_row.addWidget(self.btn_export_audio)
-        trim_lay.addLayout(exp_row)
-        edit_tab_lay.addWidget(trim_grp, stretch=1)
-
-        # Middle column: Adjustable Edit / Scene Cut Markers, MP4 Chapters & Video Splitter
-        cuts_grp = QGroupBox("Scene Cuts, MP4 Chapters & Splitter")
-        cuts_lay = QVBoxLayout(cuts_grp)
-        cuts_lay.setSpacing(4)
-
-        cuts_top = QHBoxLayout()
-        btn_find_cuts = QPushButton("🔍 Detect Cuts / Chapters")
-        btn_find_cuts.clicked.connect(self.detect_cuts_for_current)
-        cuts_top.addWidget(btn_find_cuts)
-        btn_prev_cut = QPushButton("◀ Cut")
-        btn_prev_cut.clicked.connect(lambda: self.jump_cut(-1))
-        cuts_top.addWidget(btn_prev_cut)
-        btn_next_cut = QPushButton("Cut ▶")
-        btn_next_cut.clicked.connect(lambda: self.jump_cut(1))
-        cuts_top.addWidget(btn_next_cut)
-        cuts_lay.addLayout(cuts_top)
-
-        self.cuts_list = QListWidget()
-        self.cuts_list.setMaximumHeight(68)
-        self.cuts_list.setToolTip(
-            "Click a cut/chapter to preview; double-click or click '✏️ Name' to title the chapter; "
-            "scrub and click '↔ Move Cut' to adjust"
-        )
-        self.cuts_list.currentRowChanged.connect(self._on_cut_selected)
-        self.cuts_list.itemDoubleClicked.connect(lambda _item: self.rename_selected_chapter())
-        cuts_lay.addWidget(self.cuts_list)
-
-        cuts_adj = QHBoxLayout()
-        btn_add_cut = QPushButton("+ Add Here")
-        btn_add_cut.clicked.connect(self.add_cut_at_current)
-        cuts_adj.addWidget(btn_add_cut)
-        btn_nudge_cut = QPushButton("↔ Move Here")
-        btn_nudge_cut.setToolTip("Move selected cut/chapter point to current scrubber frame")
-        btn_nudge_cut.clicked.connect(self.move_selected_cut_to_current)
-        cuts_adj.addWidget(btn_nudge_cut)
-        btn_name_cut = QPushButton("✏️ Name")
-        btn_name_cut.setToolTip("Set a custom chapter title for the selected cut point")
-        btn_name_cut.clicked.connect(self.rename_selected_chapter)
-        cuts_adj.addWidget(btn_name_cut)
-        btn_del_cut = QPushButton("Remove")
-        btn_del_cut.clicked.connect(self.remove_selected_cut)
-        cuts_adj.addWidget(btn_del_cut)
-        cuts_lay.addLayout(cuts_adj)
-
-        cuts_export_row = QHBoxLayout()
-        btn_save_chapters = QPushButton("📑 Save MP4 w/ Chapters")
-        btn_save_chapters.setMinimumHeight(34)
-        btn_save_chapters.setToolTip(
-            "Embed detected/adjusted cuts as native MP4 chapter markers (QuickTime, VLC, Premiere, YouTube)"
-        )
-        btn_save_chapters.setStyleSheet(
-            "background-color: #1e5c3a; color: white; font-weight: bold; border-radius: 5px; border: none;"
-        )
-        btn_save_chapters.clicked.connect(self.export_current_video_with_chapters)
-        cuts_export_row.addWidget(btn_save_chapters)
-
-        btn_split_segs = QPushButton("✂️ Split into Clips")
-        btn_split_segs.setMinimumHeight(34)
-        btn_split_segs.setToolTip("Split video at each cut into separate numbered MP4 clips")
-        btn_split_segs.setStyleSheet(
-            "background-color: #1a3d6e; color: white; font-weight: bold; border-radius: 5px; border: none;"
-        )
-        btn_split_segs.clicked.connect(self.split_current_video_by_cuts)
-        cuts_export_row.addWidget(btn_split_segs)
-        cuts_lay.addLayout(cuts_export_row)
-        edit_tab_lay.addWidget(cuts_grp, stretch=1)
-
-        # Right column: Narration & Captions (Offline Whisper + Manual/SRT)
-        narr_grp = QGroupBox("Narration & Captions")
-        narr_lay = QVBoxLayout(narr_grp)
-        narr_lay.setSpacing(4)
-
-        narr_row = QHBoxLayout()
-        self.mic_device_combo = QComboBox()
-        self.mic_device_combo.setToolTip("Select microphone or internal audio input device")
-        self._populate_mic_devices()
-        narr_row.addWidget(self.mic_device_combo)
-
-        self.btn_rec_mic = QPushButton("🎙 Record VO")
-        self.btn_rec_mic.setCheckable(True)
-        self.btn_rec_mic.setToolTip("Record voiceover (auto-plays video while recording so you can narrate to picture)")
-        self.btn_rec_mic.toggled.connect(self.toggle_mic_recording)
-        narr_row.addWidget(self.btn_rec_mic)
-
-        btn_load_narr = QPushButton("File…")
-        btn_load_narr.clicked.connect(self.choose_narration_file)
-        narr_row.addWidget(btn_load_narr)
-
-        self.narr_mode_combo = QComboBox()
-        self.narr_mode_combo.addItem("Duck Video", "duck")
-        self.narr_mode_combo.addItem("Replace Audio", "replace")
-        narr_row.addWidget(self.narr_mode_combo)
-
-        btn_clear_narr = QPushButton("✕")
-        btn_clear_narr.setFixedWidth(26)
-        btn_clear_narr.setToolTip("Clear narration track")
-        btn_clear_narr.clicked.connect(self.clear_narration)
-        narr_row.addWidget(btn_clear_narr)
-        narr_lay.addLayout(narr_row)
-
-        self.narr_label = QLabel("Narration: None")
-        self.narr_label.setStyleSheet("color: #8888aa; font-size: 10px;")
-        narr_lay.addWidget(self.narr_label)
-
-        cap_btn_row = QHBoxLayout()
-        self.btn_auto_cap = QPushButton("💬 Auto-Caption Video")
-        self.btn_auto_cap.setToolTip("Offline AI speech-to-text captions (watch with sound off)")
-        self.btn_auto_cap.clicked.connect(self.auto_transcribe_captions)
-        cap_btn_row.addWidget(self.btn_auto_cap)
-
-        self.auto_cap_on_load_chk = QCheckBox("Auto on Load")
-        self.auto_cap_on_load_chk.setToolTip("Automatically generate subtitles when a video is downloaded or opened")
-        cap_btn_row.addWidget(self.auto_cap_on_load_chk)
-
-        btn_add_cap = QPushButton("+ Add Caption")
-        btn_add_cap.clicked.connect(self.add_manual_caption)
-        cap_btn_row.addWidget(btn_add_cap)
-
-        btn_srt = QPushButton("SRT…")
-        btn_srt.setToolTip("Load or save .srt subtitles")
-        btn_srt.clicked.connect(self.manage_srt_menu)
-        cap_btn_row.addWidget(btn_srt)
-
-        btn_clear_cap = QPushButton("Clear")
-        btn_clear_cap.clicked.connect(self.clear_captions)
-        cap_btn_row.addWidget(btn_clear_cap)
-        narr_lay.addLayout(cap_btn_row)
-
-        self.caption_list = QListWidget()
-        self.caption_list.setMaximumHeight(55)
-        self.caption_list.currentRowChanged.connect(self._on_caption_selected)
-        narr_lay.addWidget(self.caption_list)
-
-        edit_tab_lay.addWidget(narr_grp, stretch=1)
-
-        self.mode_tabs.addTab(edit_tab, "✂️  Edit, Trim, GIF & Captions")
+        self.mode_tabs.addTab(capture_tab, "📸  Still Frame Capture (Single, Batch, Interval && Scene)")
         right_panel.addWidget(self.mode_tabs)
 
         # Progress + status
@@ -1495,7 +1665,7 @@ class VideoFrameCapture(QMainWindow):
         self.progress.setVisible(False)
         right_panel.addWidget(self.progress)
 
-        self.status_label = QLabel("Ready  ·  Drag a video folder here to begin")
+        self.status_label = QLabel("Ready  ·  Import a video or drag a folder here to begin")
         self.status_label.setStyleSheet("color: #8888aa; padding: 2px 4px; font-size: 11px;")
         right_panel.addWidget(self.status_label)
 
@@ -1504,6 +1674,10 @@ class VideoFrameCapture(QMainWindow):
 
         main_layout.addWidget(left_widget)
         main_layout.addWidget(right_widget, stretch=1)
+
+        # Ensure pressing Spacebar always toggles video Play/Pause instead of clicking focused buttons
+        for btn in self.findChildren(QPushButton):
+            btn.setFocusPolicy(Qt.NoFocus)
 
     def open_downloader(self):
         if self.download_dialog is None:
@@ -1518,9 +1692,10 @@ class VideoFrameCapture(QMainWindow):
         name = os.path.basename(path)
         if name in self.video_files:
             self.file_list.setCurrentRow(self.video_files.index(name))
-            self.mode_tabs.setCurrentIndex(1)
+            self.mode_tabs.setCurrentIndex(0)
 
     def _setup_shortcuts(self):
+        QShortcut(QKeySequence(Qt.Key_Space), self, self.toggle_play)
         QShortcut(QKeySequence("Ctrl+O"), self, self.import_video_files)
         QShortcut(QKeySequence("Ctrl+S"), self, self.capture_single)
         QShortcut(QKeySequence("Ctrl+C"), self, self.copy_frame_to_clipboard)
@@ -1809,12 +1984,15 @@ class VideoFrameCapture(QMainWindow):
         w = int(self.current_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(self.current_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+        dur = self.total_frames / self.fps
         self.frame_slider.setMaximum(max(0, self.total_frames - 1))
         self.frame_slider.setValue(0)
-        self.jump_spin.setMaximum(self.total_frames / self.fps)
+        self.jump_spin.blockSignals(True)
+        self.jump_spin.setMaximum(max(0.01, dur))
+        self.jump_spin.setValue(0.0)
+        self.jump_spin.blockSignals(False)
         self.btn_play.setEnabled(True)
 
-        dur = self.total_frames / self.fps
         self.trim_in_sec = 0.0
         self.trim_out_sec = dur
         self.in_spin.blockSignals(True)
@@ -1825,10 +2003,24 @@ class VideoFrameCapture(QMainWindow):
         self.out_spin.setValue(round(dur, 2))
         self.in_spin.blockSignals(False)
         self.out_spin.blockSignals(False)
+
+        self.markup_start_spin.blockSignals(True)
+        self.markup_end_spin.blockSignals(True)
+        self.markup_start_spin.setMaximum(max(0.01, dur))
+        self.markup_end_spin.setMaximum(max(0.01, dur))
+        self.markup_start_spin.setValue(0.0)
+        self.markup_end_spin.setValue(min(round(dur, 2), 3.0))
+        self.markup_start_spin.blockSignals(False)
+        self.markup_end_spin.blockSignals(False)
+
         self.freeze_at_sec = None
+        self.freeze_at_spin.blockSignals(True)
+        self.freeze_at_spin.setMaximum(max(0.01, dur))
+        self.freeze_at_spin.setValue(0.0)
+        self.freeze_at_spin.blockSignals(False)
         self.btn_freeze_here.blockSignals(True)
         self.btn_freeze_here.setChecked(False)
-        self.btn_freeze_here.setText("❄️ Hold Frame:")
+        self.btn_freeze_here.setText("❄️ Hold")
         self.btn_freeze_here.blockSignals(False)
         self.preview_label.video_duration = dur
         self.preview_label.freeze_at = None
@@ -1887,6 +2079,10 @@ class VideoFrameCapture(QMainWindow):
             caption_text=self._active_caption_at(cur_sec),
             current_sec=cur_sec,
         )
+        if not self.jump_spin.hasFocus():
+            self.jump_spin.blockSignals(True)
+            self.jump_spin.setValue(round(cur_sec, 2))
+            self.jump_spin.blockSignals(False)
         self.time_label.setText(
             f"{self.fmt_time(cur_sec)} / {self.fmt_time(total_sec)}")
         self.frame_label.setText(f"Frame: {frame_num} / {self.total_frames - 1}")
@@ -1912,7 +2108,7 @@ class VideoFrameCapture(QMainWindow):
     def jump_to_second(self):
         if not self.current_cap:
             return
-        frame = int(self.jump_spin.value() * self.fps)
+        frame = int(round(self.jump_spin.value() * self.fps))
         self.frame_slider.setValue(max(0, min(frame, self.total_frames - 1)))
 
     def use_current_timecode(self):
@@ -1934,7 +2130,7 @@ class VideoFrameCapture(QMainWindow):
         else:
             super().keyPressEvent(event)
 
-    # ── Playback & JKL Shuttle ───────────────────────────────────────────────
+    # ── Playback & JKL Shuttle (-16x to +16x) ────────────────────────────────
 
     def toggle_play(self):
         if self._playing:
@@ -1944,35 +2140,43 @@ class VideoFrameCapture(QMainWindow):
             self._start_playback()
 
     def shuttle_reverse(self):
-        """J key: play in reverse or increase reverse shuttle speed (-1x, -2x, -4x)."""
+        """J key: play in reverse or double reverse shuttle speed (-1x, -2x, -4x, -8x, -16x)."""
         if not self.current_cap:
             return
         if not self._playing or self._playback_rate >= 0:
             self._playback_rate = -1.0
         elif self._playback_rate > -2.0:
             self._playback_rate = -2.0
-        else:
+        elif self._playback_rate > -4.0:
             self._playback_rate = -4.0
+        elif self._playback_rate > -8.0:
+            self._playback_rate = -8.0
+        else:
+            self._playback_rate = -16.0
         self._start_playback()
-        self.status_label.setText(f"⏪  J Shuttle Reverse ({self._playback_rate:g}x)  ·  Press K to pause, L for forward")
+        self.status_label.setText(f"⏪  J Shuttle Reverse ({self._playback_rate:g}x)  ·  Press K/Space to pause, L for forward")
 
     def shuttle_pause(self):
         """K key: pause playback immediately."""
         self._stop_playback()
-        self.status_label.setText("⏸  K Paused  ·  Press J for reverse, L for forward")
+        self.status_label.setText("⏸  K Paused  ·  Press J for reverse (up to -16x), L for forward (up to 16x)")
 
     def shuttle_forward(self):
-        """L key: play forward or increase forward shuttle speed (1x, 2x, 4x)."""
+        """L key: play forward or double forward shuttle speed (1x, 2x, 4x, 8x, 16x)."""
         if not self.current_cap:
             return
         if not self._playing or self._playback_rate <= 0:
             self._playback_rate = 1.0
         elif self._playback_rate < 2.0:
             self._playback_rate = 2.0
-        else:
+        elif self._playback_rate < 4.0:
             self._playback_rate = 4.0
+        elif self._playback_rate < 8.0:
+            self._playback_rate = 8.0
+        else:
+            self._playback_rate = 16.0
         self._start_playback()
-        self.status_label.setText(f"⏩  L Shuttle Forward ({self._playback_rate:g}x)  ·  Press K to pause, J for reverse")
+        self.status_label.setText(f"⏩  L Shuttle Forward ({self._playback_rate:g}x)  ·  Press K/Space to pause, J for reverse")
 
     def _start_playback(self):
         if not self.current_cap:
@@ -2018,7 +2222,15 @@ class VideoFrameCapture(QMainWindow):
         self.frame_slider.blockSignals(False)
         self.show_frame(nxt)
 
-    # ── Output format ─────────────────────────────────────────────────────────
+    # ── Output format & Per-Video Still Subfolder ─────────────────────────────
+
+    def _frames_dir_for(self, video_path):
+        """Return and create `<output_folder>/<video_stem>_frames/` so still images stay organized."""
+        base_out = self.output_folder or os.path.join(os.path.dirname(video_path), "captured_frames")
+        stem = os.path.splitext(os.path.basename(video_path))[0]
+        frames_dir = os.path.join(base_out, f"{stem}_frames")
+        os.makedirs(frames_dir, exist_ok=True)
+        return frames_dir
 
     def _on_format_changed(self, fmt):
         is_jpeg = fmt == "JPEG"
@@ -2049,7 +2261,6 @@ class VideoFrameCapture(QMainWindow):
     @staticmethod
     def _composite_on_white(bgra):
         """Flatten BGRA onto a white background — used for JPEG export."""
-        import numpy as np
         b, g, r, a = cv2.split(bgra)
         alpha = a.astype(np.float32) / 255.0
         def blend(ch):
@@ -2080,7 +2291,7 @@ class VideoFrameCapture(QMainWindow):
         return [self.timecode_list.item(i).data(Qt.UserRole)
                 for i in range(self.timecode_list.count())]
 
-    # ── Capture ───────────────────────────────────────────────────────────────
+    # ── Capture (Organized into <output_folder>/<stem>_frames/) ───────────────
 
     def capture_single(self):
         if not self.current_cap or not self.current_video_path:
@@ -2092,7 +2303,7 @@ class VideoFrameCapture(QMainWindow):
             self.status_label.setText("Error: could not read frame")
             return
 
-        os.makedirs(self.output_folder, exist_ok=True)
+        frames_dir = self._frames_dir_for(self.current_video_path)
         stem = os.path.splitext(os.path.basename(self.current_video_path))[0]
         sec  = frame_num / self.fps
         visible_anns = self.preview_label.visible_annotations_at(sec)
@@ -2102,10 +2313,10 @@ class VideoFrameCapture(QMainWindow):
                 visible_anns,
                 caption_text=self._active_caption_at(sec),
             )
-        base = os.path.join(self.output_folder, f"{stem}_frame{frame_num}_{sec:.2f}s")
+        base = os.path.join(frames_dir, f"{stem}_frame{frame_num}_{sec:.2f}s")
         path = self._save_frame(frame, base)
 
-        self.status_label.setText(f"✅  Saved: {os.path.basename(path)}")
+        self.status_label.setText(f"✅  Saved: {os.path.basename(frames_dir)}/{os.path.basename(path)}")
         self._flash_capture()
         self._refresh_contact_sheet()
 
@@ -2132,7 +2343,7 @@ class VideoFrameCapture(QMainWindow):
             self, "Batch Capture",
             f"Extract {len(timecodes)} timecode(s) ({tc_str})\n"
             f"from {len(self.video_files)} video(s)?\n\n"
-            f"Output → {self.output_folder}",
+            f"Output → {self.output_folder}/<video>_frames/",
             QMessageBox.Yes | QMessageBox.No)
         if reply != QMessageBox.Yes:
             return
@@ -2156,6 +2367,7 @@ class VideoFrameCapture(QMainWindow):
             fps   = cap.get(cv2.CAP_PROP_FPS) or 30
             total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             stem  = os.path.splitext(filename)[0]
+            frames_dir = self._frames_dir_for(filepath)
 
             for tc in timecodes:
                 tgt = max(0, min(int(tc * fps), total - 1))
@@ -2165,7 +2377,7 @@ class VideoFrameCapture(QMainWindow):
                 if not ret:
                     errors.append(f"{filename} @ {tc:.2f}s: could not read frame")
                 else:
-                    base = os.path.join(self.output_folder, f"{stem}_{tc:.2f}s")
+                    base = os.path.join(frames_dir, f"{stem}_{tc:.2f}s")
                     self._save_frame(frame, base)
                     success += 1
                 self.progress.setValue(op)
@@ -2182,7 +2394,7 @@ class VideoFrameCapture(QMainWindow):
         self._refresh_contact_sheet()
         QMessageBox.information(self, "Batch Complete", msg)
 
-    # ── Interval capture ──────────────────────────────────────────────────────
+    # ── Interval capture (respects [In → Out] for current video & saves to <stem>_frames/) ──
 
     def capture_interval_single(self):
         if not self.current_cap or not self.current_video_path:
@@ -2201,6 +2413,7 @@ class VideoFrameCapture(QMainWindow):
     def _run_interval_capture(self, paths):
         interval = self.interval_spin.value()
         os.makedirs(self.output_folder, exist_ok=True)
+        single_active = (len(paths) == 1 and paths[0] == self.current_video_path)
 
         # Fast metadata pass to size the progress bar
         total_ops = 0
@@ -2209,7 +2422,9 @@ class VideoFrameCapture(QMainWindow):
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             dur = total_f / fps if fps else 0
-            total_ops += int(dur / interval) + 1
+            s_sec = self.in_spin.value() if single_active else 0.0
+            e_sec = min(dur, self.out_spin.value()) if (single_active and self.out_spin.value() > s_sec) else dur
+            total_ops += int(max(0.0, e_sec - s_sec) / interval) + 1
             cap.release()
 
         self.progress.setVisible(True)
@@ -2226,15 +2441,18 @@ class VideoFrameCapture(QMainWindow):
             total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             dur = total_f / fps
             stem = os.path.splitext(os.path.basename(path))[0]
-            times, t = [], 0.0
-            while t <= dur + 0.001:
+            frames_dir = self._frames_dir_for(path)
+            s_sec = self.in_spin.value() if single_active else 0.0
+            e_sec = min(dur, self.out_spin.value()) if (single_active and self.out_spin.value() > s_sec) else dur
+            times, t = [], s_sec
+            while t <= e_sec + 0.001:
                 times.append(t)
                 t += interval
             frame_nums = [min(int(round(t * fps)), total_f - 1) for t in times]
             for t, (_n, ret, frame) in zip(times, _read_frames(cap, frame_nums)):
                 op += 1
                 if ret:
-                    base = os.path.join(self.output_folder, f"{stem}_{t:.1f}s")
+                    base = os.path.join(frames_dir, f"{stem}_{t:.1f}s")
                     self._save_frame(frame, base)
                     success += 1
                 else:
@@ -2252,7 +2470,7 @@ class VideoFrameCapture(QMainWindow):
         if len(paths) > 1 or errors:
             QMessageBox.information(self, "Interval Capture Complete", msg)
 
-    # ── Scene capture ─────────────────────────────────────────────────────────
+    # ── Scene capture (respects [In → Out] for current video & saves to <stem>_frames/) ──
 
     def capture_scenes_single(self):
         if not self.current_cap or not self.current_video_path:
@@ -2276,6 +2494,7 @@ class VideoFrameCapture(QMainWindow):
             return
         threshold = self.scene_threshold_slider.value() / 100.0
         os.makedirs(self.output_folder, exist_ok=True)
+        single_active = (len(paths) == 1 and paths[0] == self.current_video_path)
 
         self.progress.setVisible(True)
         self.progress.setMaximum(len(paths))
@@ -2284,10 +2503,13 @@ class VideoFrameCapture(QMainWindow):
         success, errors = 0, []
         for i, path in enumerate(paths):
             stem = os.path.splitext(os.path.basename(path))[0]
+            frames_dir = self._frames_dir_for(path)
             self.status_label.setText(f"Scanning scenes: {os.path.basename(path)}…")
             QApplication.processEvents()
 
-            cuts = _detect_scene_cuts(path, threshold)
+            s_sec = self.in_spin.value() if single_active else 0.0
+            e_sec = self.out_spin.value() if (single_active and self.out_spin.value() > s_sec) else None
+            cuts = _detect_scene_cuts(path, threshold, start_sec=s_sec, end_sec=e_sec)
             if cuts is None:
                 errors.append(f"{os.path.basename(path)}: ffmpeg error")
                 self.progress.setValue(i + 1)
@@ -2302,8 +2524,9 @@ class VideoFrameCapture(QMainWindow):
             fps = cap.get(cv2.CAP_PROP_FPS) or 30
             total_f = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             dur = total_f / fps
+            end_bound = min(dur, e_sec) if e_sec is not None else dur
 
-            boundaries = sorted({0.0} | set(cuts) | {dur})
+            boundaries = sorted({s_sec} | set(cuts) | {end_bound})
             scenes = [
                 (boundaries[j], boundaries[j + 1])
                 for j in range(len(boundaries) - 1)
@@ -2316,7 +2539,7 @@ class VideoFrameCapture(QMainWindow):
                     zip(scenes, _read_frames(cap, frame_nums))):
                 if ret:
                     base = os.path.join(
-                        self.output_folder,
+                        frames_dir,
                         f"{stem}_scene{idx + 1:03d}_{start:.2f}s")
                     self._save_frame(frame, base)
                     success += 1
@@ -2363,6 +2586,76 @@ class VideoFrameCapture(QMainWindow):
             self.preview_label.refresh_display()
         self._update_timeline_feedback()
 
+    def _on_markup_spin_edited(self, _value=None):
+        """User typed directly into the Markup Start / End spinboxes in the Timing Strip."""
+        if not self.preview_label.annotations:
+            return
+        last = self.preview_label.annotations[-1]
+        s_val = round(self.markup_start_spin.value(), 2)
+        e_val = round(self.markup_end_spin.value(), 2)
+        if e_val <= s_val:
+            e_val = round(s_val + 0.5, 2)
+            self.markup_end_spin.blockSignals(True)
+            self.markup_end_spin.setValue(e_val)
+            self.markup_end_spin.blockSignals(False)
+        last.start_sec = s_val
+        last.end_sec = e_val
+        self.preview_label.refresh_display()
+        self._update_timeline_feedback()
+        self.status_label.setText(f"🖍  Markup timing updated: {s_val:.2f}s → {e_val:.2f}s")
+
+    def _on_freeze_at_spin_edited(self, value):
+        """User typed a Hold Frame timestamp directly into the Timing Strip."""
+        if not self.current_cap:
+            return
+        self.freeze_at_sec = round(float(value), 2)
+        if not self.btn_freeze_here.isChecked():
+            self.btn_freeze_here.blockSignals(True)
+            self.btn_freeze_here.setChecked(True)
+            self.btn_freeze_here.blockSignals(False)
+        self.preview_label.freeze_at = self.freeze_at_sec
+        self.preview_label.freeze_duration = self.freeze_dur_spin.value()
+        self.preview_label.refresh_display()
+        self._update_timeline_feedback()
+
+    # ── Interactive Timeline Map Bar drag handlers ───────────────────────────
+
+    def _on_timeline_drag_in(self, sec):
+        if not self.current_cap:
+            return
+        self.in_spin.setValue(round(float(sec), 2))
+        self.status_label.setText(f"[ Trim In dragged to {self.in_spin.value():.2f}s → Out {self.out_spin.value():.2f}s")
+
+    def _on_timeline_drag_out(self, sec):
+        if not self.current_cap:
+            return
+        self.out_spin.setValue(round(float(sec), 2))
+        self.status_label.setText(f"Trim Out ] dragged: {self.in_spin.value():.2f}s → {self.out_spin.value():.2f}s")
+
+    def _on_timeline_scrub(self, sec):
+        if not self.current_cap:
+            return
+        frame = max(0, min(int(round(float(sec) * self.fps)), self.total_frames - 1))
+        self.frame_slider.setValue(frame)
+
+    def _on_timeline_markup_span(self, start_sec, end_sec):
+        if not self.preview_label.annotations:
+            return
+        last = self.preview_label.annotations[-1]
+        last.start_sec = round(float(start_sec), 2)
+        last.end_sec = round(float(end_sec), 2)
+        self.preview_label.refresh_display()
+        self._update_timeline_feedback()
+
+    def _on_timeline_freeze_moved(self, sec):
+        if not self.current_cap:
+            return
+        self.freeze_at_sec = round(float(sec), 2)
+        self.freeze_at_spin.blockSignals(True)
+        self.freeze_at_spin.setValue(self.freeze_at_sec)
+        self.freeze_at_spin.blockSignals(False)
+        self._update_timeline_feedback()
+
     def set_last_markup_in(self):
         if not self.current_cap or not self.preview_label.annotations:
             self.status_label.setText("Draw an arrow, circle, box, or title first, then set its In/Out times.")
@@ -2400,17 +2693,20 @@ class VideoFrameCapture(QMainWindow):
             self.freeze_at_sec = None
             self.preview_label.freeze_at = None
             self.preview_label.freeze_duration = 0.0
-            self.btn_freeze_here.setText("❄️ Hold Frame:")
+            self.btn_freeze_here.setText("❄️ Hold")
             self.preview_label.refresh_display()
             self._update_timeline_feedback()
             self.status_label.setText("Freeze-frame hold cleared")
             return
-        sec = round(self.frame_slider.value() / self.fps, 2)
+        sec = round(self.frame_slider.value() / self.fps, 2) if self.freeze_at_sec is None else self.freeze_at_sec
         hold_dur = self.freeze_dur_spin.value()
         self.freeze_at_sec = sec
+        self.freeze_at_spin.blockSignals(True)
+        self.freeze_at_spin.setValue(sec)
+        self.freeze_at_spin.blockSignals(False)
         self.preview_label.freeze_at = sec
         self.preview_label.freeze_duration = hold_dur
-        self.btn_freeze_here.setText(f"❄️ Hold @{sec:.2f}s → +{hold_dur:.1f}s")
+        self.btn_freeze_here.setText("❄️ Hold ON")
         self.preview_label.refresh_display()
         self._update_timeline_feedback()
         self.status_label.setText(
@@ -2435,7 +2731,13 @@ class VideoFrameCapture(QMainWindow):
         self.preview_label.freeze_at = hold_at
         self.preview_label.freeze_duration = hold_dur
         if hold_on:
-            self.btn_freeze_here.setText(f"❄️ Hold @{hold_at:.2f}s → +{hold_dur:.1f}s")
+            self.btn_freeze_here.setText("❄️ Hold ON")
+            if hasattr(self, "freeze_at_spin") and not self.freeze_at_spin.hasFocus():
+                self.freeze_at_spin.blockSignals(True)
+                self.freeze_at_spin.setValue(round(hold_at, 2))
+                self.freeze_at_spin.blockSignals(False)
+        else:
+            self.btn_freeze_here.setText("❄️ Hold")
         self.timeline_bar.update_state(
             duration=dur,
             current_sec=cur_sec,
@@ -2451,6 +2753,14 @@ class VideoFrameCapture(QMainWindow):
             last = self.preview_label.annotations[-1]
             vis_count = len(self.preview_label.visible_annotations_at(cur_sec))
             end_disp = min(dur, last.end_sec) if dur > 0 else last.end_sec
+            if hasattr(self, "markup_start_spin") and not self.markup_start_spin.hasFocus():
+                self.markup_start_spin.blockSignals(True)
+                self.markup_start_spin.setValue(round(last.start_sec, 2))
+                self.markup_start_spin.blockSignals(False)
+            if hasattr(self, "markup_end_spin") and not self.markup_end_spin.hasFocus():
+                self.markup_end_spin.blockSignals(True)
+                self.markup_end_spin.setValue(round(end_disp, 2))
+                self.markup_end_spin.blockSignals(False)
             if last.end_sec >= 99999.0 and last.start_sec <= 0.01:
                 parts.append(f"🖍 Markup ({len(self.preview_label.annotations)}): All Clip [0.00s → {dur:.2f}s]")
             else:
@@ -2474,7 +2784,7 @@ class VideoFrameCapture(QMainWindow):
             dir_lbl = "⏪ Rev" if rate < 0 else "⏩ Fwd"
             parts.append(f"{dir_lbl} {rate:g}x (J/K/L)")
         else:
-            parts.append("J/K/L Shuttle Ready")
+            parts.append("J/K/L (up to 16x)")
         self.feedback_banner.setText("   ·   ".join(parts))
 
     def set_trim_in(self):
@@ -2518,11 +2828,13 @@ class VideoFrameCapture(QMainWindow):
         stem = os.path.splitext(os.path.basename(self.current_video_path))[0]
         s_sec = self.in_spin.value()
         e_sec = self.out_spin.value()
+        mp4_q = self.mp4_quality_combo.currentData() or "high"
+        q_suffix = "" if (as_gif or mp4_q == "high") else f"_{mp4_q}"
         ext = ".gif" if as_gif else ".mp4"
         out_path = os.path.join(
-            self.output_folder, f"{stem}_edit_{s_sec:.2f}s-{e_sec:.2f}s{ext}"
+            self.output_folder, f"{stem}_edit_{s_sec:.2f}s-{e_sec:.2f}s{q_suffix}{ext}"
         )
-        self.status_label.setText(f"Rendering {'GIF' if as_gif else 'MP4'} → {os.path.basename(out_path)}…")
+        self.status_label.setText(f"Rendering {'GIF' if as_gif else f'MP4 ({mp4_q})'} → {os.path.basename(out_path)}…")
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
         QApplication.processEvents()
@@ -2544,6 +2856,7 @@ class VideoFrameCapture(QMainWindow):
                 as_gif=as_gif,
                 gif_fps=self.gif_fps_combo.currentData(),
                 gif_width=self.gif_width_combo.currentData(),
+                mp4_quality=mp4_q,
             )
             if not as_gif and self.detected_cuts:
                 freeze_on = self.btn_freeze_here.isChecked() and self.freeze_at_sec is not None
@@ -2581,22 +2894,21 @@ class VideoFrameCapture(QMainWindow):
         stem = os.path.splitext(os.path.basename(self.current_video_path))[0]
         s_sec = self.in_spin.value()
         e_sec = self.out_spin.value()
-        default = os.path.join(self.output_folder, f"{stem}_{s_sec:.2f}s-{e_sec:.2f}s.mp3")
-        out_path, _flt = QFileDialog.getSaveFileName(
-            self, "Export Audio", default, "MP3 Audio (*.mp3);;WAV Audio (*.wav)"
-        )
-        if not out_path:
-            return
-        fmt = "wav" if out_path.lower().endswith(".wav") else "mp3"
+        mode = self.mp3_bitrate_combo.currentData() if hasattr(self, "mp3_bitrate_combo") else "192k"
+        is_wav = (mode == "wav")
+        ext = ".wav" if is_wav else ".mp3"
+        bitrate = "192k" if is_wav else str(mode or "192k")
+        out_path = os.path.join(self.output_folder, f"{stem}_{s_sec:.2f}s-{e_sec:.2f}s{ext}")
         try:
             export_audio_clip(
                 ffmpeg, self.current_video_path, out_path,
                 start_sec=s_sec, end_sec=e_sec,
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
-                fmt=fmt,
+                fmt="wav" if is_wav else "mp3",
+                bitrate=bitrate,
             )
-            self.status_label.setText(f"✅  Exported audio: {os.path.basename(out_path)}")
+            self.status_label.setText(f"✅  Saved audio ({mode.upper()}): {os.path.basename(out_path)}")
         except Exception as exc:
             QMessageBox.warning(self, APP_NAME, f"Audio export failed:\n\n{exc}")
 
@@ -2618,7 +2930,7 @@ class VideoFrameCapture(QMainWindow):
         self.cuts_list.blockSignals(True)
         self.cuts_list.clear()
         for idx, sec in enumerate(self.detected_cuts, 1):
-            chap_num = idx + 1  # 0.00s is Chapter 1, first cut starts Chapter 2
+            chap_num = idx + 1  # Start of clip is Chapter 1, first cut starts Chapter 2
             title = self._default_chapter_title_for(sec, chap_num)
             item = QListWidgetItem(
                 f"Ch {chap_num:02d} @ {sec:.2f}s — {title}  (Frame {int(round(sec * self.fps))})"
@@ -2633,17 +2945,19 @@ class VideoFrameCapture(QMainWindow):
             QMessageBox.information(self, APP_NAME, "Load a video first.")
             return
         threshold = self.scene_threshold_slider.value() / 100.0
-        self.status_label.setText("Detecting scene cuts / chapter points…")
+        s_sec = self.in_spin.value()
+        e_sec = self.out_spin.value()
+        self.status_label.setText(f"Detecting scene cuts / chapters within [{s_sec:.2f}s → {e_sec:.2f}s]…")
         QApplication.processEvents()
-        cuts = _detect_scene_cuts(self.current_video_path, threshold)
+        cuts = _detect_scene_cuts(self.current_video_path, threshold, start_sec=s_sec, end_sec=e_sec)
         if cuts is None:
             QMessageBox.warning(self, APP_NAME, "Scene detection failed.")
             return
         self.detected_cuts = sorted(round(c, 2) for c in cuts)
         self._refresh_cuts_list()
         self.status_label.setText(
-            f"Found {len(self.detected_cuts)} cut/chapter point(s) ({len(self.detected_cuts) + 1} chapters). "
-            f"Click '📑 Save MP4 w/ Chapters' or '✂️ Split into Clips'."
+            f"Found {len(self.detected_cuts)} cut/chapter point(s) within [{s_sec:.2f}s → {e_sec:.2f}s] "
+            f"({len(self.detected_cuts) + 1} chapters). Click '📑 Save MP4 w/ Chapters' or '✂️ Split into Clips'."
         )
 
     def _on_cut_selected(self, row):
@@ -2738,14 +3052,19 @@ class VideoFrameCapture(QMainWindow):
             return
         os.makedirs(self.output_folder, exist_ok=True)
         stem = os.path.splitext(os.path.basename(self.current_video_path))[0]
+        s_sec = self.in_spin.value()
+        e_sec = self.out_spin.value()
         out_path = os.path.join(self.output_folder, f"{stem}_chapters.mp4")
 
         # Build chapter title map including any caption-derived defaults
-        titles_map = {0.0: self.chapter_titles.get(0.0, "Chapter 1")}
+        titles_map = {
+            0.0: self.chapter_titles.get(0.0, "Chapter 1"),
+            round(s_sec, 2): self.chapter_titles.get(round(s_sec, 2), "Chapter 1"),
+        }
         for idx, sec in enumerate(self.detected_cuts, 1):
             titles_map[round(sec, 2)] = self._default_chapter_title_for(sec, idx + 1)
 
-        self.status_label.setText(f"Embedding {len(self.detected_cuts) + 1} chapters into {os.path.basename(out_path)}…")
+        self.status_label.setText(f"Embedding chapters into {os.path.basename(out_path)}…")
         QApplication.processEvents()
         try:
             saved_path, chapters = export_mp4_with_chapters(
@@ -2754,18 +3073,20 @@ class VideoFrameCapture(QMainWindow):
                 out_path,
                 self.detected_cuts,
                 chapter_titles=titles_map,
+                start_sec=s_sec,
+                end_sec=e_sec,
             )
             summary = "\n".join(
                 f"  • {idx:02d}. [{s:.2f}s – {e:.2f}s]  {t}"
                 for idx, (s, e, t) in enumerate(chapters, 1)
             )
             self.status_label.setText(
-                f"✅  Saved MP4 with {len(chapters)} chapters: {os.path.basename(saved_path)}"
+                f"✅  Saved MP4 with {len(chapters)} QuickTime-ready chapters: {os.path.basename(saved_path)}"
             )
             QMessageBox.information(
                 self,
                 "MP4 Chapters Embedded",
-                f"Saved MP4 with {len(chapters)} embedded chapter markers:\n{saved_path}\n\nChapters:\n{summary}",
+                f"Saved MP4 with {len(chapters)} QuickTime / VLC / YouTube chapter markers:\n{saved_path}\n\nChapters:\n{summary}",
             )
         except Exception as exc:
             QMessageBox.warning(self, APP_NAME, f"Failed to embed MP4 chapters:\n\n{exc}")
@@ -2782,6 +3103,9 @@ class VideoFrameCapture(QMainWindow):
         ffmpeg = _find_ffmpeg()
         stem = os.path.splitext(os.path.basename(self.current_video_path))[0]
         seg_dir = os.path.join(self.output_folder, f"{stem}_segments")
+        s_sec = self.in_spin.value()
+        e_sec = self.out_spin.value()
+        mp4_q = self.mp4_quality_combo.currentData() or "high"
         self.progress.setVisible(True)
 
         def on_prog(done, total, msg):
@@ -2799,18 +3123,21 @@ class VideoFrameCapture(QMainWindow):
                 fade_in=self.fade_in_spin.value(),
                 fade_out=self.fade_out_spin.value(),
                 progress_cb=on_prog,
+                start_sec=s_sec,
+                end_sec=e_sec,
+                mp4_quality=mp4_q,
             )
             self.progress.setVisible(False)
-            self.status_label.setText(f"✅  Split into {len(files)} segment clips in {seg_dir}")
+            self.status_label.setText(f"✅  Split [{s_sec:.2f}s → {e_sec:.2f}s] into {len(files)} clips in {seg_dir}")
             QMessageBox.information(
                 self, "Video Split Complete",
-                f"Created {len(files)} segment MP4 clip(s) in:\n{seg_dir}",
+                f"Created {len(files)} segment MP4 clip(s) within [{s_sec:.2f}s → {e_sec:.2f}s] in:\n{seg_dir}",
             )
         except Exception as exc:
             self.progress.setVisible(False)
             QMessageBox.warning(self, APP_NAME, f"Failed to split video:\n\n{exc}")
 
-    # ── Narration & Captions (Offline Whisper + Manual + SRT) ─────────────────
+    # ── Dub / Voiceover Recording & Captions (Offline Whisper + Manual + SRT) ──
 
     def _populate_mic_devices(self):
         self.mic_device_combo.clear()
@@ -2833,17 +3160,18 @@ class VideoFrameCapture(QMainWindow):
                 self._mic_process.write(b"q\n")
                 self._mic_process.closeWriteChannel()
                 self._mic_process.waitForFinished(3000)
-            self.btn_rec_mic.setText("🎙 Record VO")
+            self.btn_rec_mic.setText("🎙 Dub Record")
             if self.narration_path and os.path.isfile(self.narration_path):
-                self.narr_label.setText(f"Narration: {os.path.basename(self.narration_path)}")
-                self.status_label.setText(f"🎙 Saved voiceover: {os.path.basename(self.narration_path)}")
+                self.narr_label.setText(f"Dub Track: {os.path.basename(self.narration_path)}  (Ready for MP4 export or '🔊 Play Dub')")
+                self.status_label.setText(f"🎙 Saved dub voiceover: {os.path.basename(self.narration_path)}")
             return
 
         mic_idx = self.mic_device_combo.currentData() or "0"
         os.makedirs(self.output_folder or tempfile.gettempdir(), exist_ok=True)
+        stem = os.path.splitext(os.path.basename(self.current_video_path or "clip"))[0]
         out_wav = os.path.join(
             self.output_folder or tempfile.gettempdir(),
-            f"narration_{int(time.time())}.wav",
+            f"{stem}_dub_{int(time.time())}.wav",
         )
         self.narration_path = out_wav
         self._mic_process = QProcess(self)
@@ -2851,25 +3179,46 @@ class VideoFrameCapture(QMainWindow):
             ffmpeg,
             ["-y", "-hide_banner", "-f", "avfoundation", "-i", f":{mic_idx}", "-ac", "1", "-ar", "44100", out_wav],
         )
-        self.btn_rec_mic.setText("⏹ Stop VO")
+        self.btn_rec_mic.setText("⏹ Stop Dub")
         if self.current_cap and not self._playing:
             self._start_playback()
-        self.status_label.setText("🎙 Recording voiceover to picture… Click '⏹ Stop VO' when finished.")
+        self.status_label.setText("🎙 Recording live dub voiceover to picture… Click '⏹ Stop Dub' when finished.")
+
+    def preview_dub_audio(self):
+        """Play or stop the recorded/loaded dub audio track using macOS afplay."""
+        if self._dub_player_proc is not None and self._dub_player_proc.state() != QProcess.NotRunning:
+            self._dub_player_proc.kill()
+            self._dub_player_proc.waitForFinished(500)
+            self.btn_play_dub.setText("🔊 Play Dub")
+            self.status_label.setText("Stopped dub preview")
+            return
+        if not self.narration_path or not os.path.isfile(self.narration_path):
+            self.status_label.setText("Record a dub with '🎙 Dub Record' or load an audio file first.")
+            return
+        afplay = shutil.which("afplay") or "/usr/bin/afplay"
+        if os.path.exists(afplay):
+            self._dub_player_proc = QProcess(self)
+            self._dub_player_proc.finished.connect(lambda: self.btn_play_dub.setText("🔊 Play Dub"))
+            self._dub_player_proc.start(afplay, [self.narration_path])
+            self.btn_play_dub.setText("⏹ Stop Dub")
+            self.status_label.setText(f"🔊 Playing dub track: {os.path.basename(self.narration_path)}")
 
     def choose_narration_file(self):
         path, _flt = QFileDialog.getOpenFileName(
-            self, "Choose Narration Audio", self.output_folder or "",
+            self, "Choose Dub / Narration Audio", self.output_folder or "",
             "Audio Files (*.wav *.mp3 *.m4a *.aac *.flac)",
         )
         if path:
             self.narration_path = path
-            self.narr_label.setText(f"Narration: {os.path.basename(path)}")
-            self.status_label.setText(f"Loaded narration audio: {os.path.basename(path)}")
+            self.narr_label.setText(f"Dub Track: {os.path.basename(path)}  (Ready for MP4 export or '🔊 Play Dub')")
+            self.status_label.setText(f"Loaded dub audio: {os.path.basename(path)}")
 
     def clear_narration(self):
+        if self._dub_player_proc is not None and self._dub_player_proc.state() != QProcess.NotRunning:
+            self._dub_player_proc.kill()
         self.narration_path = None
-        self.narr_label.setText("Narration: None")
-        self.status_label.setText("Cleared narration audio")
+        self.narr_label.setText("Dub Track: None  (Click '🎙 Dub Record' to record voiceover synced to video)")
+        self.status_label.setText("Cleared dub audio")
 
     def _refresh_caption_list(self):
         self.caption_list.blockSignals(True)
@@ -2885,6 +3234,24 @@ class VideoFrameCapture(QMainWindow):
             cue = self.caption_cues[row]
             frame = max(0, min(int(round(cue.start * self.fps)), self.total_frames - 1))
             self.frame_slider.setValue(frame)
+
+    def edit_selected_caption(self):
+        row = self.caption_list.currentRow()
+        if row < 0 or row >= len(self.caption_cues):
+            return
+        from PyQt5.QtWidgets import QInputDialog
+        cue = self.caption_cues[row]
+        text, ok = QInputDialog.getText(
+            self,
+            "Edit Subtitle / Caption",
+            f"Subtitle [{cue.start:.2f}s – {cue.end:.2f}s]:",
+            text=cue.text,
+        )
+        if ok and text.strip():
+            cue.text = text.strip()
+            self._refresh_caption_list()
+            self.caption_list.setCurrentRow(row)
+            self.status_label.setText(f"Updated caption [{cue.start:.2f}s–{cue.end:.2f}s]")
 
     def auto_transcribe_captions(self):
         if not self.current_video_path:

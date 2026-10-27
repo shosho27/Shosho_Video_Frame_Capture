@@ -453,13 +453,24 @@ class AnnotatedPreviewLabel(QLabel):
 
 
 class TimelineMapBar(QWidget):
-    """Visual timeline bar below the scrubber showing Trim [In..Out], Markup spans,
-    Freeze-Frame Hold, Edit Cuts, and current Playhead with clear Start → End labels.
+    """Interactive visual timeline bar below the scrubber showing Trim [In..Out], Markup spans,
+    Freeze-Frame Hold, Edit Cuts, and current Playhead.
+    Supports clicking & dragging the green In/Out handles, Markup bars, Hold Frame bar, or Playhead.
     """
+    trim_in_changed = pyqtSignal(float)
+    trim_out_changed = pyqtSignal(float)
+    playhead_scrubbed = pyqtSignal(float)
+    markup_span_changed = pyqtSignal(int, float, float)
+    freeze_moved = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(26)
+        self.setFixedHeight(28)
+        self.setMouseTracking(True)
+        self.setToolTip(
+            "Drag the green [ In or Out ] lines to adjust trim (or double-click a green line to reset it).\n"
+            "Drag colored Markup bars or the cyan Hold bar to move/resize them, or click anywhere to scrub."
+        )
         self.duration = 0.0
         self.current_sec = 0.0
         self.trim_in = 0.0
@@ -468,6 +479,9 @@ class TimelineMapBar(QWidget):
         self.freeze_at = None
         self.freeze_duration = 0.0
         self.cuts = []
+        self._drag_mode = None  # 'in', 'out', 'playhead', 'markup_move', 'markup_end', 'freeze'
+        self._drag_ann_idx = -1
+        self._drag_offset_sec = 0.0
 
     def update_state(
         self,
@@ -491,10 +505,114 @@ class TimelineMapBar(QWidget):
         self.update()
 
     def _sec_to_x(self, sec):
-        w = max(1, self.width() - 12)
+        w = max(1, self.width() - 16)
         denom = max(0.01, float(self.duration or 0.01))
         ratio = max(0.0, min(1.0, float(sec or 0.0) / denom))
-        return 6.0 + ratio * w
+        return 8.0 + ratio * w
+
+    def _x_to_sec(self, x):
+        w = max(1, self.width() - 16)
+        denom = max(0.01, float(self.duration or 0.01))
+        ratio = max(0.0, min(1.0, (float(x) - 8.0) / w))
+        return round(ratio * denom, 2)
+
+    def _hit_test(self, pos):
+        if self.duration <= 0.01:
+            return None, -1
+        px, py = pos.x(), pos.y()
+        x_in = self._sec_to_x(self.trim_in)
+        x_out = self._sec_to_x(self.trim_out)
+        # Check Out handle first so if In and Out are close, Out is easy to grab and pull right
+        if abs(px - x_out) <= 8:
+            return "out", -1
+        if abs(px - x_in) <= 8:
+            return "in", -1
+        if self.freeze_at is not None and self.freeze_duration > 0 and py >= self.height() // 2:
+            fx1 = self._sec_to_x(self.freeze_at)
+            fx2 = max(fx1 + 8.0, self._sec_to_x(min(self.duration, self.freeze_at + self.freeze_duration)))
+            if fx1 - 4 <= px <= fx2 + 4:
+                return "freeze", -1
+        for idx in range(len(self.annotations) - 1, -1, -1):
+            ann = self.annotations[idx]
+            ax1 = self._sec_to_x(max(0.0, ann.start_sec))
+            ax2 = max(ax1 + 6.0, self._sec_to_x(min(self.duration, ann.end_sec)))
+            if py <= self.height() // 2 + 2:
+                if abs(px - ax2) <= 6:
+                    return "markup_end", idx
+                if ax1 <= px <= ax2:
+                    return "markup_move", idx
+        return "playhead", -1
+
+    def mousePressEvent(self, event):
+        if self.duration <= 0.01 or event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        mode, idx = self._hit_test(event.pos())
+        self._drag_mode = mode
+        self._drag_ann_idx = idx
+        sec = self._x_to_sec(event.pos().x())
+        if mode == "markup_move" and 0 <= idx < len(self.annotations):
+            self._drag_offset_sec = sec - self.annotations[idx].start_sec
+        elif mode == "freeze" and self.freeze_at is not None:
+            self._drag_offset_sec = sec - self.freeze_at
+        elif mode == "playhead":
+            self.playhead_scrubbed.emit(sec)
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.duration <= 0.01:
+            super().mouseMoveEvent(event)
+            return
+        if self._drag_mode is None:
+            mode, _ = self._hit_test(event.pos())
+            if mode in ("in", "out", "markup_end"):
+                self.setCursor(Qt.SplitHCursor)
+            elif mode in ("markup_move", "freeze"):
+                self.setCursor(Qt.OpenHandCursor)
+            else:
+                self.setCursor(Qt.PointingHandCursor)
+            return
+
+        sec = self._x_to_sec(event.pos().x())
+        if self._drag_mode == "in":
+            new_in = max(0.0, min(sec, self.trim_out - 0.1))
+            self.trim_in = new_in
+            self.trim_in_changed.emit(new_in)
+        elif self._drag_mode == "out":
+            new_out = max(self.trim_in + 0.1, min(sec, self.duration))
+            self.trim_out = new_out
+            self.trim_out_changed.emit(new_out)
+        elif self._drag_mode == "playhead":
+            self.playhead_scrubbed.emit(sec)
+        elif self._drag_mode == "markup_end" and 0 <= self._drag_ann_idx < len(self.annotations):
+            ann = self.annotations[self._drag_ann_idx]
+            new_end = max(ann.start_sec + 0.2, min(self.duration, sec))
+            self.markup_span_changed.emit(self._drag_ann_idx, ann.start_sec, new_end)
+        elif self._drag_mode == "markup_move" and 0 <= self._drag_ann_idx < len(self.annotations):
+            ann = self.annotations[self._drag_ann_idx]
+            span = max(0.2, min(self.duration, ann.end_sec) - ann.start_sec)
+            new_start = max(0.0, min(self.duration - span, sec - self._drag_offset_sec))
+            self.markup_span_changed.emit(self._drag_ann_idx, round(new_start, 2), round(new_start + span, 2))
+        elif self._drag_mode == "freeze" and self.freeze_at is not None:
+            new_f = max(0.0, min(self.duration, round(sec - self._drag_offset_sec, 2)))
+            self.freeze_moved.emit(new_f)
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_mode = None
+        self._drag_ann_idx = -1
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self.duration <= 0.01:
+            return
+        mode, _ = self._hit_test(event.pos())
+        if mode == "out":
+            self.trim_out = round(self.duration, 2)
+            self.trim_out_changed.emit(self.trim_out)
+        elif mode == "in":
+            self.trim_in = 0.0
+            self.trim_in_changed.emit(0.0)
 
     def paintEvent(self, event):
         del event
@@ -505,7 +623,7 @@ class TimelineMapBar(QWidget):
             h = self.height()
 
             # Track background
-            track = QRectF(6, 3, max(1, w - 12), h - 6)
+            track = QRectF(8, 3, max(1, w - 16), h - 6)
             painter.setPen(QPen(QColor("#3a3a55"), 1))
             painter.setBrush(QColor("#1a1a28"))
             painter.drawRoundedRect(track, 4, 4)
@@ -513,46 +631,54 @@ class TimelineMapBar(QWidget):
             if self.duration <= 0.0:
                 return
 
-            # Trim In..Out region
+            # Trim In..Out region with draggable bracket handles
             x_in = self._sec_to_x(self.trim_in)
             x_out = self._sec_to_x(self.trim_out)
-            if x_out > x_in:
+            if x_out >= x_in:
                 painter.setPen(Qt.NoPen)
                 painter.setBrush(QColor(46, 204, 113, 45))
-                painter.drawRect(QRectF(x_in, 4, x_out - x_in, h - 8))
-                painter.setPen(QPen(QColor("#2ecc71"), 2))
-                painter.drawLine(QPointF(x_in, 3), QPointF(x_in, h - 3))
-                painter.drawLine(QPointF(x_out, 3), QPointF(x_out, h - 3))
+                painter.drawRect(QRectF(x_in, 4, max(2.0, x_out - x_in), h - 8))
+                pen_trim = QPen(QColor("#2ecc71"), 3)
+                painter.setPen(pen_trim)
+                # Left '[' handle
+                painter.drawLine(QPointF(x_in, 2), QPointF(x_in, h - 2))
+                painter.drawLine(QPointF(x_in, 2), QPointF(x_in + 5, 2))
+                painter.drawLine(QPointF(x_in, h - 2), QPointF(x_in + 5, h - 2))
+                # Right ']' handle
+                painter.drawLine(QPointF(x_out, 2), QPointF(x_out, h - 2))
+                painter.drawLine(QPointF(x_out - 5, 2), QPointF(x_out, 2))
+                painter.drawLine(QPointF(x_out - 5, h - 2), QPointF(x_out, h - 2))
 
-            # Markup spans (amber/orange bars showing start -> end)
+            # Scene cut ticks (drawn inside active trim range or subtly outside)
+            for cut in self.cuts:
+                cx = self._sec_to_x(cut)
+                in_bounds = self.trim_in - 0.02 <= cut <= self.trim_out + 0.02
+                painter.setPen(QPen(QColor("#ff9f0a" if in_bounds else "#665030"), 1.8 if in_bounds else 1.0))
+                painter.drawLine(QPointF(cx, 4), QPointF(cx, h - 4))
+
+            # Markup spans (top lane)
             for ann in self.annotations:
                 s = max(0.0, ann.start_sec)
                 e = min(self.duration, ann.end_sec)
                 ax1 = self._sec_to_x(s)
-                ax2 = max(ax1 + 4.0, self._sec_to_x(e))
-                painter.setPen(QPen(QColor(ann.color), 1))
+                ax2 = max(ax1 + 5.0, self._sec_to_x(e))
+                painter.setPen(QPen(QColor("#ffffff"), 1))
                 c = QColor(ann.color)
-                c.setAlpha(155)
+                c.setAlpha(200)
                 painter.setBrush(c)
-                painter.drawRoundedRect(QRectF(ax1, 5, ax2 - ax1, 7), 2, 2)
+                painter.drawRoundedRect(QRectF(ax1, 4, ax2 - ax1, 8), 2, 2)
 
-            # Freeze hold marker & span (cyan bar)
+            # Freeze hold marker & span (bottom lane — always drawn brightly on top!)
             if self.freeze_at is not None and self.freeze_duration > 0:
                 fx1 = self._sec_to_x(self.freeze_at)
-                fx2 = max(fx1 + 6.0, self._sec_to_x(min(self.duration, self.freeze_at + self.freeze_duration)))
-                painter.setPen(QPen(QColor("#00d2ff"), 1.5))
-                painter.setBrush(QColor(0, 210, 255, 170))
-                painter.drawRoundedRect(QRectF(fx1, h - 12, fx2 - fx1, 7), 2, 2)
-
-            # Scene cut ticks
-            painter.setPen(QPen(QColor("#ff9f0a"), 1.5))
-            for cut in self.cuts:
-                cx = self._sec_to_x(cut)
-                painter.drawLine(QPointF(cx, 4), QPointF(cx, h - 4))
+                fx2 = max(fx1 + 8.0, self._sec_to_x(min(self.duration, self.freeze_at + self.freeze_duration)))
+                painter.setPen(QPen(QColor("#ffffff"), 1.2))
+                painter.setBrush(QColor(0, 210, 255, 225))
+                painter.drawRoundedRect(QRectF(fx1, h - 12, fx2 - fx1, 8), 2, 2)
 
             # Playhead line
             px = self._sec_to_x(self.current_sec)
-            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.setPen(QPen(QColor("#ffffff"), 2.2))
             painter.drawLine(QPointF(px, 1), QPointF(px, h - 1))
         finally:
             painter.end()
@@ -688,10 +814,11 @@ def export_video_or_gif(
     freeze_duration=0.0,
     captions=None,
     narration_path=None,
-    narration_mode="duck",  # 'duck' or 'replace'
+    narration_mode="duck",  # 'duck', 'replace', or 'mix'
     as_gif=False,
     gif_fps=12,
     gif_width=480,
+    mp4_quality="high",  # 'high', 'medium', 'small'
 ):
     """Render a trimmed MP4 or palette-optimized GIF with optional markup, freeze-frame hold,
     fade in/out, burned-in captions, and voiceover narration.
@@ -724,6 +851,16 @@ def export_video_or_gif(
                 return cue.text
         return None
 
+    crf_val = "18"
+    max_h = 0
+    if not as_gif:
+        if mp4_quality == "medium":
+            crf_val = "23"
+            max_h = 720
+        elif mp4_quality == "small":
+            crf_val = "28"
+            max_h = 480
+
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_video = os.path.join(tmpdir, "rendered_video.mp4")
         start_f = max(0, int(round(s_sec * fps)))
@@ -731,10 +868,13 @@ def export_video_or_gif(
         freeze_f = int(round(freeze_at * fps)) if has_freeze else -1
         freeze_hold_frames = int(round(freeze_duration * fps)) if has_freeze else 0
 
-        # Render frame-accurate video stream via FFmpeg rawvideo pipe so annotations,
-        # captions, freeze-holds, and fades are crystal clear at full resolution.
-        out_w = width if width % 2 == 0 else width - 1
-        out_h = height if height % 2 == 0 else height - 1
+        target_w, target_h = width, height
+        if max_h > 0 and height > max_h:
+            scale_r = max_h / float(height)
+            target_w = max(2, int(round(width * scale_r)))
+            target_h = max_h
+        out_w = target_w if target_w % 2 == 0 else target_w - 1
+        out_h = target_h if target_h % 2 == 0 else target_h - 1
         total_out_frames = (end_f - start_f + 1) + (freeze_hold_frames if has_freeze else 0)
         fade_in_frames = int(round(fade_in * fps)) if fade_in > 0 else 0
         fade_out_frames = int(round(fade_out * fps)) if fade_out > 0 else 0
@@ -744,7 +884,7 @@ def export_video_or_gif(
             "-f", "rawvideo", "-pix_fmt", "bgr24",
             "-s", f"{out_w}x{out_h}", "-r", f"{fps:.4f}",
             "-i", "-",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", crf_val,
             "-pix_fmt", "yuv420p",
             raw_video,
         ]
@@ -832,12 +972,9 @@ def export_video_or_gif(
         filter_parts = []
         audio_out_label = None
 
-        if has_src_audio and (not has_narr or narration_mode == "duck"):
+        if has_src_audio and (not has_narr or narration_mode in ("duck", "mix")):
             if has_freeze:
-                # Split source audio around freeze point and insert silence during freeze hold
-                pre_dur = max(0.01, freeze_at - s_sec)
                 post_start = freeze_at
-                post_dur = max(0.01, e_sec - freeze_at)
                 mux_cmd += ["-i", video_path]
                 filter_parts.append(
                     f"[1:a]atrim=start={s_sec:.3f}:end={freeze_at:.3f},asetpts=PTS-STARTPTS[a_pre];"
@@ -851,11 +988,12 @@ def export_video_or_gif(
             audio_out_label = "[src_a]"
 
         if has_narr:
-            narr_idx = 2 if (has_src_audio and narration_mode == "duck") else 1
+            narr_idx = 2 if (has_src_audio and narration_mode in ("duck", "mix")) else 1
             mux_cmd += ["-i", narration_path]
-            if audio_out_label and narration_mode == "duck":
+            if audio_out_label and narration_mode in ("duck", "mix"):
+                vol = "0.22" if narration_mode == "duck" else "1.0"
                 filter_parts.append(
-                    f"{audio_out_label}volume=0.22[ducked];"
+                    f"{audio_out_label}volume={vol}[ducked];"
                     f"[{narr_idx}:a]asetpts=PTS-STARTPTS[narr];"
                     f"[ducked][narr]amix=inputs=2:duration=first:dropout_transition=0[mixed_a]"
                 )
@@ -887,8 +1025,21 @@ def export_video_or_gif(
         return out_path
 
 
-def split_video_by_cuts(ffmpeg, video_path, out_folder, cut_seconds, fade_in=0.0, fade_out=0.0, progress_cb=None):
-    """Split `video_path` at `cut_seconds` into numbered Adobe-ready MP4 segments in `out_folder`."""
+def split_video_by_cuts(
+    ffmpeg,
+    video_path,
+    out_folder,
+    cut_seconds,
+    fade_in=0.0,
+    fade_out=0.0,
+    start_sec=0.0,
+    end_sec=None,
+    mp4_quality="high",
+    progress_cb=None,
+):
+    """Split `video_path` at `cut_seconds` within `[start_sec, end_sec]` into numbered
+    Adobe-ready MP4 segments in `out_folder`.
+    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Could not open {video_path}")
@@ -897,7 +1048,15 @@ def split_video_by_cuts(ffmpeg, video_path, out_folder, cut_seconds, fade_in=0.0
     dur = total_f / fps if fps > 0 else 0.0
     cap.release()
 
-    boundaries = sorted({0.0} | {float(c) for c in cut_seconds if 0.05 < float(c) < dur - 0.05} | {dur})
+    lo = max(0.0, float(start_sec or 0.0))
+    hi = float(end_sec) if (end_sec is not None and float(end_sec) > lo + 0.05) else dur
+    hi = min(dur, max(lo + 0.1, hi))
+
+    boundaries = sorted(
+        {round(lo, 2)}
+        | {round(float(c), 2) for c in (cut_seconds or []) if lo + 0.05 < float(c) < hi - 0.05}
+        | {round(hi, 2)}
+    )
     segments = [
         (boundaries[i], boundaries[i + 1])
         for i in range(len(boundaries) - 1)
@@ -906,6 +1065,7 @@ def split_video_by_cuts(ffmpeg, video_path, out_folder, cut_seconds, fade_in=0.0
     os.makedirs(out_folder, exist_ok=True)
     stem = os.path.splitext(os.path.basename(video_path))[0]
     created = []
+    crf_val = {"high": "18", "medium": "23", "small": "28"}.get(mp4_quality, "18")
 
     for idx, (s_sec, e_sec) in enumerate(segments, 1):
         if progress_cb:
@@ -913,18 +1073,19 @@ def split_video_by_cuts(ffmpeg, video_path, out_folder, cut_seconds, fade_in=0.0
         out_path = os.path.join(
             out_folder, f"{stem}_segment_{idx:03d}_{s_sec:.2f}s-{e_sec:.2f}s.mp4"
         )
-        if fade_in > 0 or fade_out > 0:
+        if fade_in > 0 or fade_out > 0 or mp4_quality != "high":
             export_video_or_gif(
                 ffmpeg, video_path, out_path,
                 start_sec=s_sec, end_sec=e_sec,
                 fade_in=fade_in, fade_out=fade_out,
+                mp4_quality=mp4_quality,
             )
         else:
             cmd = [
                 ffmpeg, "-y", "-hide_banner", "-nostdin",
                 "-ss", f"{s_sec:.3f}", "-to", f"{e_sec:.3f}",
                 "-i", video_path,
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", crf_val,
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart", out_path,
             ]
@@ -987,9 +1148,69 @@ def build_ffmetadata_chapters(cut_seconds, duration, chapter_titles=None):
     return "\n".join(lines) + "\n", chapters
 
 
-def export_mp4_with_chapters(ffmpeg, video_path, out_path, cut_seconds, chapter_titles=None):
-    """Embed scene-cut / custom chapter points into an MP4 file using FFmpeg `FFMETADATA1`.
-    Uses fast stream-copy when possible, with automatic H.264/AAC fallback for non-MP4 inputs.
+def _fix_mp4_quicktime_chapter_locale(mp4_path):
+    """Patch ISO-BMFF `mdhd` language codes inside the `moov` atom from `0x0000`/`0x55c4` (`und`)
+    to `0x15c7` (`eng`) so macOS QuickTime Player (`AVURLAsset.chapterMetadataGroups(bestMatchingPreferredLanguages:)`)
+    displays the chapter markers immediately.
+    """
+    try:
+        with open(mp4_path, "rb") as fh:
+            data = bytearray(fh.read())
+    except OSError:
+        return
+
+    offset = 0
+    n = len(data)
+    moov_start, moov_end = 0, min(n, 4 * 1024 * 1024)
+    while offset + 8 <= n:
+        box_size = int.from_bytes(data[offset:offset + 4], "big")
+        box_type = bytes(data[offset + 4:offset + 8])
+        if box_size == 1 and offset + 16 <= n:
+            box_size = int.from_bytes(data[offset + 8:offset + 16], "big")
+        elif box_size == 0:
+            box_size = n - offset
+        if box_size < 8 or offset + box_size > n:
+            break
+        if box_type == b"moov":
+            moov_start = offset
+            moov_end = offset + box_size
+            break
+        offset += box_size
+
+    changed = False
+    idx = moov_start
+    while idx < moov_end:
+        pos = data.find(b"mdhd", idx, moov_end)
+        if pos == -1 or pos < 4:
+            break
+        box_len = int.from_bytes(data[pos - 4:pos], "big")
+        version = data[pos + 4] if pos + 5 <= moov_end else 99
+        if box_len in (32, 44) and version in (0, 1):
+            lang_offset = pos + 4 + (32 if version == 1 else 20)
+            if lang_offset + 2 <= moov_end:
+                lang_val = int.from_bytes(data[lang_offset:lang_offset + 2], "big")
+                if lang_val in (0x0000, 0x55C4, 0x7FFF):
+                    data[lang_offset:lang_offset + 2] = (0x15C7).to_bytes(2, "big")
+                    changed = True
+        idx = pos + 4
+
+    if changed:
+        with open(mp4_path, "wb") as fh:
+            fh.write(data)
+
+
+def export_mp4_with_chapters(
+    ffmpeg,
+    video_path,
+    out_path,
+    cut_seconds,
+    chapter_titles=None,
+    start_sec=0.0,
+    end_sec=None,
+):
+    """Embed scene-cut / custom chapter points into an MP4 file using FFmpeg `FFMETADATA1`
+    and QuickTime-compatible `eng` `mdhd` language tags.
+    Respects `[start_sec, end_sec]` trim boundaries if provided.
     Returns `(out_path, chapters)`.
     """
     cap = cv2.VideoCapture(video_path)
@@ -1000,8 +1221,27 @@ def export_mp4_with_chapters(ffmpeg, video_path, out_path, cut_seconds, chapter_
     dur = total_f / fps if fps > 0 else 0.0
     cap.release()
 
+    lo = max(0.0, float(start_sec or 0.0))
+    hi = float(end_sec) if (end_sec is not None and float(end_sec) > lo + 0.05) else dur
+    hi = min(dur, max(lo + 0.1, hi))
+    clip_dur = round(hi - lo, 2)
+    is_trimmed = (lo > 0.05) or (hi < dur - 0.05)
+
+    titles_in = dict(chapter_titles or {})
+    rel_cuts = []
+    rel_titles = {0.0: titles_in.get(round(lo, 2)) or titles_in.get(0.0) or "Chapter 1"}
+    for c in sorted(cut_seconds or []):
+        fc = float(c)
+        if lo + 0.05 < fc < hi - 0.05:
+            rc = round(fc - lo, 2)
+            rel_cuts.append(rc)
+            if round(fc, 2) in titles_in:
+                rel_titles[rc] = titles_in[round(fc, 2)]
+            elif rc in titles_in:
+                rel_titles[rc] = titles_in[rc]
+
     meta_text, chapters = build_ffmetadata_chapters(
-        cut_seconds, dur, chapter_titles=chapter_titles
+        rel_cuts, clip_dur, chapter_titles=rel_titles
     )
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
@@ -1010,21 +1250,26 @@ def export_mp4_with_chapters(ffmpeg, video_path, out_path, cut_seconds, chapter_
         with open(meta_path, "w", encoding="utf-8") as fh:
             fh.write(meta_text)
 
+        trim_args = ["-ss", f"{lo:.3f}", "-to", f"{hi:.3f}"] if is_trimmed else []
         copy_cmd = [
             ffmpeg, "-y", "-hide_banner", "-nostdin",
+            *trim_args,
             "-i", video_path,
             "-f", "ffmetadata", "-i", meta_path,
-            "-map", "0",
+            "-map", "0:v:0", "-map", "0:a?",
             "-map_metadata", "1",
             "-map_chapters", "1",
-            "-c", "copy",
-            "-movflags", "+faststart",
+            "-c:v", "copy", "-c:a", "copy",
+            "-metadata:s:v:0", "language=eng",
+            "-metadata:s:a:0", "language=eng",
+            "-movflags", "+faststart+disable_chpl",
             out_path,
         ]
         res = subprocess.run(copy_cmd, capture_output=True, text=True)
         if res.returncode != 0:
             reencode_cmd = [
                 ffmpeg, "-y", "-hide_banner", "-nostdin",
+                *trim_args,
                 "-i", video_path,
                 "-f", "ffmetadata", "-i", meta_path,
                 "-map", "0:v:0", "-map", "0:a?",
@@ -1032,11 +1277,14 @@ def export_mp4_with_chapters(ffmpeg, video_path, out_path, cut_seconds, chapter_
                 "-map_chapters", "1",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-                "-movflags", "+faststart",
+                "-metadata:s:v:0", "language=eng",
+                "-metadata:s:a:0", "language=eng",
+                "-movflags", "+faststart+disable_chpl",
                 out_path,
             ]
             res2 = subprocess.run(reencode_cmd, capture_output=True, text=True)
             if res2.returncode != 0:
                 raise RuntimeError(res2.stderr.strip()[-300:] if res2.stderr else "Failed to write MP4 chapters")
 
+    _fix_mp4_quicktime_chapter_locale(out_path)
     return out_path, chapters
