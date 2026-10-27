@@ -63,6 +63,15 @@ class DownloaderTests(unittest.TestCase):
             ('https://vm.tiktok.com/ZMexample/', 'vm.tiktok'),
             ('https://vt.tiktok.com/ZMexample/', 'vm.tiktok'),
             ('https://www.tiktok.com/t/ZMexample/', 'vm.tiktok'),
+            ('https://vimeo.com/123456789', 'vimeo'),
+            ('https://player.vimeo.com/video/123456789', 'vimeo'),
+            ('https://www.reddit.com/r/videos/comments/abc123/test/', 'reddit'),
+            ('https://www.twitch.tv/videos/123456789', 'twitch:vod'),
+            ('https://clips.twitch.tv/ExampleClip', 'twitch:clips'),
+            ('https://www.linkedin.com/posts/example_activity-123456789-abcd', 'linkedin'),
+            ('https://www.dailymotion.com/video/x7tgad0', 'dailymotion'),
+            ('https://dai.ly/x7tgad0', 'dailymotion'),
+            ('https://www.loom.com/share/abcdef1234567890abcdef1234567890', 'loom'),
         ]
         extractors = gen_extractors()
         for url, name in examples:
@@ -180,7 +189,7 @@ class DownloaderTests(unittest.TestCase):
         with patch('video_downloader.download_command', return_value=[sys.executable, '-c', script]):
             self.dialog.start_download()
 
-    def test_mkv_converts_and_preserves_existing_mp4_and_original(self):
+    def test_mkv_converts_deletes_original_and_preserves_existing_mp4(self):
         import cv2
         for codec in ('libx264', 'huffyuv'):
             with self.subTest(codec=codec):
@@ -196,7 +205,7 @@ class DownloaderTests(unittest.TestCase):
                 self.assertEqual(converted.suffix, '.mp4')
                 self.assertNotEqual(converted, existing)
                 self.assertEqual(existing.read_bytes(), b'do not replace')
-                self.assertTrue(path.exists())
+                self.assertFalse(path.exists(), 'MKV original should be deleted')
                 cap = cv2.VideoCapture(str(converted))
                 self.assertTrue(cap.read()[0])
                 cap.release()
@@ -211,9 +220,46 @@ class DownloaderTests(unittest.TestCase):
                 if codec == 'huffyuv':
                     self.assertEqual(self.dialog._phase, 'encode')
                 self.assertEqual(list(Path(self.temp.name).glob('.shosho-converting-*')), [])
-                # Each subtest creates its own input at the same path.
-                path.unlink()
                 self.dialog.video_ready.disconnect(ready.append)
+
+    def test_mp3_mode_command_and_h264_preference(self):
+        args = download_command(self.dialog.url.text(), self.temp.name, mp3_bitrate=256)
+        options = parse_options(args[3:])
+        self.assertTrue(options.ydl_opts['postprocessors'])
+        self.assertIn('256', json.dumps(options.ydl_opts['postprocessors']))
+        video = parse_options(download_command(self.dialog.url.text(), self.temp.name)[3:])
+        self.assertIn('h264', json.dumps(video.ydl_opts['format_sort']))
+
+    def test_vp9_mp4_is_reencoded_in_place_for_adobe(self):
+        import cv2
+        ffmpeg = self.dialog.ffmpeg
+        path = Path(self.temp.name) / 'vp9 clip.mp4'
+        subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+                        '-i', 'color=c=red:s=64x64:r=10:d=1', '-c:v', 'libvpx-vp9', str(path)],
+                       check=True, capture_output=True)
+        from video_downloader import probe_codecs
+        self.assertEqual(probe_codecs(ffmpeg, str(path))[0], 'vp9')
+        ready = []
+        self.dialog.video_ready.connect(ready.append)
+        self._report_download(path)
+        self.wait_for_finish(timeout=20)
+        self.assertEqual(ready, [str(path)], self.dialog.log.toPlainText())
+        self.assertEqual(probe_codecs(ffmpeg, str(path))[:2], ('h264', 'yuv420p'))
+
+    def test_video_plus_mp3_creates_both_with_bitrate(self):
+        path = self._make_mkv()
+        self.dialog.mode.setCurrentIndex(2)
+        self.dialog.bitrate.setCurrentIndex(3)
+        ready = []
+        self.dialog.video_ready.connect(ready.append)
+        self._report_download(path)
+        self.wait_for_finish(timeout=20)
+        mp3 = path.with_suffix('.mp3')
+        self.assertTrue(mp3.exists(), self.dialog.log.toPlainText())
+        self.assertTrue(path.with_suffix('.mp4').exists())
+        self.assertFalse(path.exists())
+        out = subprocess.run([self.dialog.ffmpeg, '-i', str(mp3)], capture_output=True, text=True).stderr
+        self.assertIn('320 kb/s', out)
 
     def test_bundled_ffmpeg_works_without_system_installation(self):
         import imageio_ffmpeg
@@ -251,7 +297,7 @@ class DownloaderTests(unittest.TestCase):
         path = Path(self.temp.name) / 'original.mkv'
         path.write_bytes(b'original')
         sleeper = Path(self.temp.name) / 'slow-converter'
-        sleeper.write_text(f'#!{sys.executable}\nimport time\ntime.sleep(30)\n')
+        sleeper.write_text(f'#!{sys.executable}\nimport sys, time\nif "-c:v" in sys.argv: time.sleep(30)\nsys.exit(1)\n')
         sleeper.chmod(0o755)
         self.dialog.ffmpeg = str(sleeper)
         ready = []
@@ -261,7 +307,7 @@ class DownloaderTests(unittest.TestCase):
         while self.dialog._phase == 'download' and time.monotonic() < deadline:
             self.app.processEvents()
             time.sleep(.01)
-        self.assertEqual(self.dialog._phase, 'remux')
+        self.assertIn(self.dialog._phase, ('remux', 'encode'))
         self.assertTrue(self.dialog.process.waitForStarted(3000))
         self.dialog.cancel_download()
         self.wait_for_finish()
