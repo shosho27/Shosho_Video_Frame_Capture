@@ -65,3 +65,31 @@ on the main thread.
 
 Defaults to `captured_frames/` inside the selected video folder, created
 automatically. User can override via the Output Folder button at any time.
+Show in Finder reveals that folder with `/usr/bin/open -R`.
+
+## Contact sheet
+
+`ContactSheetDialog` is non-modal. Batch Frames seeks the batch timecode with
+`contact_seek_frame`. A blank frame looks ahead 1, 2, and 3 seconds
+(`choose_contact_time`) and the caption shows the time kept. Frame Folder lists
+PNG, JPEG, and TIFF in that folder only.
+
+`paint_contact_page` is shared by the preview and `write_contact_pdf`.
+`contact_grid` picks the largest contained cell for the frame aspect. The
+picture block is centered with `origin_x` and `origin_y`. A near-black border
+is trimmed in `_content_source_rect`, then the picture is contain-fit in the
+slot. `drawImage` embeds the source pixels. `CONTACT_SHEET_DPI` is 300. The
+media box stays in points. The preview label background is `#1e1e2e`, so a
+portrait page reads as a tall white sheet.
+
+## Link downloads
+
+`src/video_downloader.py` builds a yt-dlp command for YouTube, X, Facebook,
+Instagram, TikTok, and LinkedIn posts. A country host such as `pt.linkedin.com`
+is rewritten to `www.linkedin.com`, which is what the extractor matches. LinkedIn
+MP4s omit height, so the format selector falls back to the best combined file.
+`javascript_runtime()` checks a bundled `bin` directory,
+then PATH, then `/opt/homebrew/bin` and `/usr/local/bin`, Deno before Node.
+The command gets `--js-runtimes` when a runtime is found. MKV results convert
+to MP4 and the original is kept. `src/downloader_update.py` can replace the
+engine with a verified `yt-dlp_macos` binary under Application Support.

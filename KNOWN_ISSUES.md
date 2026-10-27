@@ -41,3 +41,19 @@ slider if results are unexpected.
 ## Apple Silicon only
 
 The distributed build is arm64. Will not run on Intel Macs.
+
+## The day-to-day app does not bundle Deno
+
+`Video Frame Capture.spec` is the build copied to `~/Apps`. It finds Deno at
+`/opt/homebrew/bin/deno` or `/usr/local/bin/deno` when Finder's PATH does not
+include Homebrew. A Mac without Deno or Node can fail a YouTube download with
+an n-challenge error. X and Facebook downloads succeeded on October 15, 2026
+with this build. YouTube was not retried after that lookup was added.
+`build_app.py` is the build that puts Deno inside the app, and that bundle has
+not been rebuilt for this round.
+
+## An open window keeps the previous build
+
+Replacing `dist/` or `~/Apps` does not change an app that is already running.
+Quit Video Frame Capture and open it again. An already-open Contact Sheet also
+keeps the frames it already grabbed.

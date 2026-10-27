@@ -3,7 +3,7 @@
 ## Requirements
 - Mac with Apple Silicon (M1, M2, M3, or M4)
 - macOS 12 or later
-- FFmpeg, the downloader, and the YouTube runtime are included in the standalone app.
+- The day-to-day app is the spec build in `~/Apps/Video Frame Capture.app`. YouTube downloads on this Mac use Homebrew Deno. The `build_app.py` bundle is the one that carries FFmpeg, yt-dlp, and Deno inside the app.
 
 ---
 
@@ -15,11 +15,16 @@ Simply **double-click** `Video Frame Capture.app` to launch it. If macOS asks "A
 
 ## Using the app
 
-### Download from YouTube, X, Facebook, or Instagram
+### Download from YouTube, X, Facebook, Instagram, TikTok, or LinkedIn
 1. Click **Download Video from Link**.
-2. Paste an individual video, post, or Reel link.
+2. Paste an individual video or post link.
 3. Choose a download folder and quality, then click **Download**.
 4. The completed video opens in frame capture automatically.
+
+An X video and a Facebook video both downloaded on October 15, 2026. YouTube,
+Instagram, and TikTok were not retried that day. YouTube needs Deno or Node
+(`brew install deno`). The spec-built app finds Homebrew Deno even when Finder
+does not put it on PATH.
 
 MKV downloads automatically convert to MP4 first. The original MKV is kept.
 If conversion fails, the app loads the original and shows a message in the
@@ -30,9 +35,19 @@ under **Use sign-in from**, then retry. This reads that browser's cookies only w
 you start the download. Public downloads use **None** by default. Some videos can
 remain unavailable because of site restrictions or changes.
 
-The standalone app includes all download and conversion dependencies. For source
+The spec-built app uses Homebrew Deno for YouTube. `build_app.py` is the bundle
+that carries the downloader, Deno, and FFmpeg inside the app. For source
 installations, install `requirements.txt` (which includes FFmpeg) and Deno or
 Node.js. See README.md for downloader updates.
+
+### Contact sheet
+1. Set the batch timecode the same way as Batch Capture, or skip that if you already have stills.
+2. Click **Contact Sheet…**.
+3. Choose **Batch Frames**, then **This Video** or **All Videos**. Or choose **Frame Folder…** and open a folder of PNG, JPEG, or TIFF files.
+4. Set **Per page**, paper size, and **Landscape** or **Portrait**. The preview is the printed page. One frame is centered. Portrait is a tall sheet.
+5. Click **Print to PDF**. One PDF holds every page. Show in Finder selects the saved file.
+
+Shane confirmed this layout on October 15, 2026. A black opening frame looks ahead up to 3 seconds. The caption shows the time that was used. Reprint an older PDF to pick up a layout change. An already-open Contact Sheet stays on the build that created it until you quit and relaunch.
 
 ### Single capture
 1. Click **Select Video Folder** (or drag a folder onto the window)

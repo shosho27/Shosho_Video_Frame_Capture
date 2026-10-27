@@ -10,3 +10,4 @@ assets/ffmpeg
 assets/whisper-*/
 captured_frames/
 /*.app
+/Android/
