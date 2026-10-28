@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from urllib.parse import urlsplit
 
 from PyQt5.QtCore import QProcess, QProcessEnvironment, QSettings, QTimer, QUrl, pyqtSignal
@@ -27,7 +29,7 @@ SUPPORTED_HOSTS = (
     'vimeo.com',
     'reddit.com', 'redd.it', 'redditmedia.com',
     'twitch.tv',
-    'linkedin.com',
+    'linkedin.com', 'lnkd.in',
     'dailymotion.com', 'dai.ly',
     'loom.com',
 )
@@ -83,10 +85,24 @@ def validate_url(value):
     return value
 
 
+def resolve_shortlink(url, timeout=10):
+    """Follow an lnkd.in redirect to the full linkedin.com URL yt-dlp's extractor needs."""
+    request = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.geturl()
+    except (urllib.error.URLError, OSError) as exc:
+        raise ValueError(f'Could not resolve the lnkd.in link: {exc}') from exc
+
+
 def normalize_url(value):
     value = validate_url(value)
     parsed = urlsplit(value)
     host = (parsed.hostname or '').lower()
+    if host in ('lnkd.in', 'www.lnkd.in'):
+        value = validate_url(resolve_shortlink(value))
+        parsed = urlsplit(value)
+        host = (parsed.hostname or '').lower()
     if host in ('vimeo.com', 'www.vimeo.com'):
         match = re.match(
             r'^/(?:channels/[^/]+/|groups/[^/]+/videos/|video/|videos/)?(\d+)(?:/([0-9a-fA-F]+))?/?$',

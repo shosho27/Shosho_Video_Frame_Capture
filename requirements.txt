@@ -3,3 +3,7 @@ opencv-python>=4.10,<6
 yt-dlp[default,curl-cffi]>=2026.8.19
 imageio-ffmpeg==0.6.0
 faster-whisper>=1.2.0
+# Pinned: faster-whisper's audio decode calls av.open(..., metadata_errors=...),
+# a kwarg newer PyAV (17+) dropped — pulling in the unpinned latest breaks
+# transcription with "open() got an unexpected keyword argument 'metadata_errors'".
+av==16.0.0

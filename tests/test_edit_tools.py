@@ -101,8 +101,7 @@ class EditToolsTests(unittest.TestCase):
             fade_in=0.3,
             fade_out=0.3,
             annotations=anns,
-            freeze_at=1.0,
-            freeze_duration=1.0,
+            holds=[{"at": 1.0, "duration": 1.0}],
             captions=cues,
             narration_path=narr_wav,
             narration_mode="duck",
@@ -220,21 +219,25 @@ class EditToolsTests(unittest.TestCase):
         self.assertAlmostEqual(window.preview_label.annotations[-1].end_sec, 1.8, places=2)
         self.assertEqual(len(window.preview_label.visible_annotations_at(1.8)), 1)
 
-        # Toggle Hold Frame at 1.00s and check feedback banner shows begin & end
+        # Add a Hold at 1.00s and check feedback banner reflects the stacked total
         window.frame_slider.setValue(10)  # 1.00s
-        window.freeze_dur_spin.setValue(2.5)
-        window.btn_freeze_here.setChecked(True)
-        self.assertIn("Hold Frame: [1.00s → +2.5s (ends 3.50s)]", window.feedback_banner.text())
+        window._add_hold(1.0, 2.5)
+        self.assertIn("Holds (1): +2.5s total", window.feedback_banner.text())
 
-        # Setting an Out point or dragging Out line must NOT clear Hold Frame!
+        # Setting an Out point or dragging Out line must NOT clear existing Holds!
         window.frame_slider.setValue(16)  # 1.60s
         window.set_trim_out()
-        self.assertTrue(window.btn_freeze_here.isChecked())
-        self.assertAlmostEqual(window.freeze_at_sec, 1.0, places=2)
+        self.assertEqual(len(window.holds), 1)
+        self.assertAlmostEqual(window.holds[0]["at"], 1.0, places=2)
         window._on_timeline_drag_out(1.9)
         self.assertAlmostEqual(window.out_spin.value(), 1.9, places=2)
-        self.assertTrue(window.btn_freeze_here.isChecked())
-        self.assertIn("Hold Frame: [1.00s → +2.5s", window.feedback_banner.text())
+        self.assertEqual(len(window.holds), 1)
+        self.assertIn("Holds (1): +2.5s total", window.feedback_banner.text())
+
+        # A second Hold stacks onto the timeline rather than replacing the first
+        window._add_hold(1.6, 1.0)
+        self.assertEqual(len(window.holds), 2)
+        self.assertIn("Holds (2): +3.5s total", window.feedback_banner.text())
 
         # Typing directly into Markup End spinbox extends the arrow duration
         window.markup_end_spin.setValue(1.95)
@@ -284,7 +287,7 @@ class EditToolsTests(unittest.TestCase):
         seg_dir = os.path.join(self.temp.name, "bounded_segs")
         files = split_video_by_cuts(
             self.ffmpeg, vid3, seg_dir, [0.2, 1.0, 2.0, 2.8],
-            start_sec=0.5, end_sec=2.5, mp4_quality="medium",
+            start_sec=0.5, end_sec=2.5, mp4_quality="720p",
         )
         self.assertEqual(len(files), 3)
         self.assertTrue(os.path.basename(files[0]).endswith("0.50s-1.00s.mp4"))

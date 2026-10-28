@@ -4,6 +4,8 @@ for Video Frame Capture.
 """
 
 from dataclasses import dataclass, field
+import csv
+import io
 import math
 import os
 import re
@@ -19,12 +21,25 @@ from PyQt5.QtGui import (
     QPen, QPixmap, QPolygonF,
 )
 from PyQt5.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QSizePolicy, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox,
+    QFileDialog, QFontComboBox, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSpinBox,
+    QTabWidget, QVBoxLayout, QWidget,
 )
+
+
+MP4_QUALITY_TIERS = {
+    # id: (CRF, cap height in px; 0 = keep the source's native resolution)
+    "original": ("16", 0),
+    "2160p": ("19", 2160),
+    "1440p": ("20", 1440),
+    "1080p": ("21", 1080),
+    "720p": ("22", 720),
+    "540p": ("23", 540),
+    "360p": ("25", 360),
+    "240p": ("27", 240),
+}
 
 
 ANNOTATION_COLORS = [
@@ -50,6 +65,8 @@ class Annotation:
     color: str = "#ff3b30"
     thickness: int = 4
     text: str = ""
+    font_family: str = "Helvetica Neue"
+    font_size: int = 26
     start_sec: float = 0.0
     end_sec: float = 999999.0
 
@@ -129,7 +146,23 @@ def write_srt(cues):
     return "\n".join(blocks)
 
 
-def render_annotations_on_qimage(qimage, annotations, caption_text=None):
+def write_captions_txt(cues):
+    """Plain transcript — one line per caption, no timestamps. For pasting into
+    a doc/description, not for re-importing into an editor."""
+    return "\n".join(cue.text.strip() for cue in cues if cue.text.strip())
+
+
+def write_captions_csv(cues):
+    """start_sec,end_sec,text — for spreadsheets or feeding another tool's pipeline."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["start_sec", "end_sec", "text"])
+    for cue in cues:
+        writer.writerow([f"{cue.start:.3f}", f"{cue.end:.3f}", cue.text.strip()])
+    return buf.getvalue()
+
+
+def render_annotations_on_qimage(qimage, annotations, caption_text=None, caption_position="bottom"):
     """Return a copy of `qimage` with vector annotations and optional caption drawn at native resolution."""
     if qimage.isNull():
         return qimage
@@ -181,7 +214,10 @@ def render_annotations_on_qimage(qimage, annotations, caption_text=None):
             )
             painter.drawRect(rect)
         elif ann.kind == "text" and ann.text:
-            font = QFont("Helvetica Neue", max(12, int(round((14 + ann.thickness * 3) * scale))))
+            font = QFont(
+                ann.font_family or "Helvetica Neue",
+                max(8, int(round((ann.font_size or 26) * scale))),
+            )
             font.setBold(True)
             painter.setFont(font)
             metrics = QFontMetrics(font)
@@ -217,7 +253,8 @@ def render_annotations_on_qimage(qimage, annotations, caption_text=None):
         box_w = min(max_w, wrapped.width() + pad_x * 2)
         box_h = wrapped.height() + pad_y * 2
         box_x = (w - box_w) / 2.0
-        box_y = h - box_h - max(18.0 * scale, h * 0.045)
+        margin_y = max(18.0 * scale, h * 0.045)
+        box_y = margin_y if caption_position == "top" else h - box_h - margin_y
         box = QRectF(box_x, box_y, box_w, box_h)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(0, 0, 0, 195))
@@ -229,7 +266,7 @@ def render_annotations_on_qimage(qimage, annotations, caption_text=None):
     return out
 
 
-def render_annotations_on_bgr(frame, annotations, caption_text=None):
+def render_annotations_on_bgr(frame, annotations, caption_text=None, caption_position="bottom"):
     """Apply vector annotations and optional caption onto an OpenCV BGR or BGRA frame."""
     if frame is None or (not annotations and not caption_text):
         return frame
@@ -242,7 +279,7 @@ def render_annotations_on_bgr(frame, annotations, caption_text=None):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, w, h, int(rgb.strides[0]), QImage.Format_RGB888).copy()
 
-    rendered = render_annotations_on_qimage(qimg, annotations, caption_text=caption_text)
+    rendered = render_annotations_on_qimage(qimg, annotations, caption_text=caption_text, caption_position=caption_position)
     conv = rendered.convertToFormat(QImage.Format_RGBA8888)
     ptr = conv.bits()
     ptr.setsize(conv.byteCount())
@@ -262,9 +299,48 @@ def make_transparent_overlay_png(width, height, annotations, path):
     return path
 
 
+class TextAnnotationDialog(QDialog):
+    """Title/Callout entry with font family and size, instead of a plain text prompt."""
+
+    def __init__(self, parent=None, text="", font_family="Helvetica Neue", font_size=26):
+        super().__init__(parent)
+        self.setWindowTitle("Add Title / Callout")
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Enter text:"))
+        self.text_edit = QLineEdit(text)
+        layout.addWidget(self.text_edit)
+
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Font:"))
+        self.font_combo = QFontComboBox()
+        self.font_combo.setCurrentFont(QFont(font_family))
+        font_row.addWidget(self.font_combo, 1)
+        font_row.addWidget(QLabel("Size:"))
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(8, 200)
+        self.size_spin.setValue(font_size)
+        font_row.addWidget(self.size_spin)
+        layout.addLayout(font_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.text_edit.setFocus()
+
+    def values(self):
+        return (
+            self.text_edit.text().strip(),
+            self.font_combo.currentFont().family(),
+            self.size_spin.value(),
+        )
+
+
 class AnnotatedPreviewLabel(QLabel):
     """Interactive video preview widget supporting click-drag arrows, circles, rectangles, and text."""
     annotations_changed = pyqtSignal()
+    selection_changed = pyqtSignal()
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
@@ -274,12 +350,18 @@ class AnnotatedPreviewLabel(QLabel):
         self.default_duration = 3.0  # seconds a new markup stays on screen (0 = entire video)
         self.current_sec = 0.0
         self.video_duration = 999999.0
-        self.freeze_at = None
-        self.freeze_duration = 0.0
+        self.active_hold = None  # (hold_dict, remaining_seconds) while a playback-driven hold wait is in progress
         self.annotations = []
+        self.selected_idx = -1
         self._drag_current = None
+        self._drag_mode = None  # None | 'move' | 'move_text' | 'resize_p1'/'resize_p2' (arrow) | 'resize_<nsew combo>'
+        self._drag_idx = None
+        self._drag_offset = None
         self._base_qimage = QImage()
         self._caption_preview = ""
+        self.caption_position = "bottom"  # "bottom" or "top" — avoids blocking lower thirds
+        self._last_text_font = "Helvetica Neue"
+        self._last_text_size = 26
 
     def set_base_qimage(self, qimage, caption_text="", current_sec=None):
         self._base_qimage = qimage
@@ -303,14 +385,93 @@ class AnnotatedPreviewLabel(QLabel):
         if self.annotations:
             self.annotations.clear()
             self._drag_current = None
+            self.selected_idx = -1
             self.refresh_display()
             self.annotations_changed.emit()
+            self.selection_changed.emit()
 
     def undo_annotation(self):
         if self.annotations:
             self.annotations.pop()
+            if self.selected_idx >= len(self.annotations):
+                self.selected_idx = -1
             self.refresh_display()
             self.annotations_changed.emit()
+            self.selection_changed.emit()
+
+    def selected_annotation(self):
+        if 0 <= self.selected_idx < len(self.annotations):
+            return self.annotations[self.selected_idx]
+        return None
+
+    def delete_selected(self):
+        if 0 <= self.selected_idx < len(self.annotations):
+            self.annotations.pop(self.selected_idx)
+            self.selected_idx = -1
+            self._drag_mode = None
+            self._drag_idx = None
+            self.refresh_display()
+            self.annotations_changed.emit()
+            self.selection_changed.emit()
+            return True
+        return False
+
+    @staticmethod
+    def _bbox(ann):
+        return min(ann.x1, ann.x2), min(ann.y1, ann.y2), max(ann.x1, ann.x2), max(ann.y1, ann.y2)
+
+    @staticmethod
+    def _handle_points(minx, miny, maxx, maxy):
+        midx, midy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+        return {
+            "nw": (minx, miny), "n": (midx, miny), "ne": (maxx, miny),
+            "e": (maxx, midy),
+            "se": (maxx, maxy), "s": (midx, maxy), "sw": (minx, maxy),
+            "w": (minx, midy),
+        }
+
+    @staticmethod
+    def _point_seg_dist(px, py, x1, y1, x2, y2):
+        dx, dy = x2 - x1, y2 - y1
+        if dx == 0 and dy == 0:
+            return math.hypot(px - x1, py - y1)
+        t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+        return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+    def _hit_test(self, nx, ny):
+        tol = 0.025
+        for idx in range(len(self.annotations) - 1, -1, -1):
+            ann = self.annotations[idx]
+            if not ann.is_visible_at(self.current_sec):
+                continue
+            if ann.kind == "text":
+                if abs(nx - ann.x1) <= 0.06 and abs(ny - ann.y1) <= 0.05:
+                    return idx
+            elif ann.kind == "arrow":
+                if self._point_seg_dist(nx, ny, ann.x1, ann.y1, ann.x2, ann.y2) <= tol:
+                    return idx
+            else:
+                minx, miny, maxx, maxy = self._bbox(ann)
+                if minx - tol <= nx <= maxx + tol and miny - tol <= ny <= maxy + tol:
+                    return idx
+        return -1
+
+    def _handle_at(self, nx, ny, idx):
+        ann = self.annotations[idx]
+        if ann.kind == "text":
+            return None
+        tol = 0.03
+        if ann.kind == "arrow":
+            if math.hypot(nx - ann.x1, ny - ann.y1) <= tol:
+                return "p1"
+            if math.hypot(nx - ann.x2, ny - ann.y2) <= tol:
+                return "p2"
+            return None
+        minx, miny, maxx, maxy = self._bbox(ann)
+        for name, (hx, hy) in self._handle_points(minx, miny, maxx, maxy).items():
+            if math.hypot(nx - hx, ny - hy) <= tol:
+                return name
+        return None
 
     def _displayed_image_rect(self):
         if self._base_qimage.isNull():
@@ -337,27 +498,62 @@ class AnnotatedPreviewLabel(QLabel):
         return max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
 
     def mousePressEvent(self, event):
-        if self.tool == "none" or self._base_qimage.isNull() or event.button() != Qt.LeftButton:
+        if self._base_qimage.isNull() or event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
             return
         norm = self._pos_to_norm(event.pos())
         if norm is None:
             return
         nx, ny = norm
+
+        if self.tool == "none":
+            self._drag_mode = None
+            self._drag_idx = None
+            if self.selected_idx >= 0:
+                handle = self._handle_at(nx, ny, self.selected_idx)
+                if handle:
+                    self._drag_mode = "resize_" + handle
+                    self._drag_idx = self.selected_idx
+                    return
+            idx = self._hit_test(nx, ny)
+            self.selected_idx = idx
+            if idx >= 0:
+                ann = self.annotations[idx]
+                if ann.kind == "text":
+                    self._drag_mode = "move_text"
+                    self._drag_offset = (nx - ann.x1, ny - ann.y1)
+                else:
+                    self._drag_mode = "move"
+                    self._drag_offset = (nx - ann.x1, ny - ann.y1, nx - ann.x2, ny - ann.y2)
+                self._drag_idx = idx
+            self.selection_changed.emit()
+            self.refresh_display()
+            return
+
+        # Starting a new markup deselects whatever was selected.
+        self.selected_idx = -1
         start_s, end_s = self._new_time_window()
         if self.tool == "text":
-            text, ok = QInputDialog.getText(self, "Add Title / Callout", "Enter text:")
-            if ok and text.strip():
-                self.annotations.append(
-                    Annotation(
-                        kind="text", x1=nx, y1=ny,
-                        color=self.color, thickness=self.thickness,
-                        text=text.strip(),
-                        start_sec=start_s, end_sec=end_s,
+            dlg = TextAnnotationDialog(
+                self, font_family=self._last_text_font, font_size=self._last_text_size
+            )
+            if dlg.exec_() == QDialog.Accepted:
+                text, family, size = dlg.values()
+                if text:
+                    self._last_text_font = family
+                    self._last_text_size = size
+                    self.annotations.append(
+                        Annotation(
+                            kind="text", x1=nx, y1=ny,
+                            color=self.color, thickness=self.thickness,
+                            text=text, font_family=family, font_size=size,
+                            start_sec=start_s, end_sec=end_s,
+                        )
                     )
-                )
-                self.refresh_display()
-                self.annotations_changed.emit()
+                    self.selected_idx = len(self.annotations) - 1
+                    self.refresh_display()
+                    self.annotations_changed.emit()
+                    self.selection_changed.emit()
             return
         self._drag_current = Annotation(
             kind=self.tool, x1=nx, y1=ny, x2=nx, y2=ny,
@@ -367,6 +563,44 @@ class AnnotatedPreviewLabel(QLabel):
         self.refresh_display()
 
     def mouseMoveEvent(self, event):
+        if self._drag_mode is not None and self._drag_idx is not None:
+            norm = self._pos_to_norm(event.pos())
+            if norm is None:
+                return
+            nx, ny = norm
+            ann = self.annotations[self._drag_idx]
+            if self._drag_mode == "move":
+                dx1, dy1, dx2, dy2 = self._drag_offset
+                ann.x1 = max(0.0, min(1.0, nx - dx1))
+                ann.y1 = max(0.0, min(1.0, ny - dy1))
+                ann.x2 = max(0.0, min(1.0, nx - dx2))
+                ann.y2 = max(0.0, min(1.0, ny - dy2))
+            elif self._drag_mode == "move_text":
+                dx1, dy1 = self._drag_offset
+                ann.x1 = max(0.0, min(1.0, nx - dx1))
+                ann.y1 = max(0.0, min(1.0, ny - dy1))
+            elif self._drag_mode in ("resize_p1", "resize_p2"):
+                if self._drag_mode == "resize_p1":
+                    ann.x1, ann.y1 = max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
+                else:
+                    ann.x2, ann.y2 = max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
+            elif self._drag_mode.startswith("resize_"):
+                handle = self._drag_mode[len("resize_"):]
+                minx, miny, maxx, maxy = self._bbox(ann)
+                nx_c, ny_c = max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny))
+                if "n" in handle:
+                    miny = ny_c
+                if "s" in handle:
+                    maxy = ny_c
+                if "w" in handle:
+                    minx = nx_c
+                if "e" in handle:
+                    maxx = nx_c
+                minx, maxx = min(minx, maxx), max(minx, maxx)
+                miny, maxy = min(miny, maxy), max(miny, maxy)
+                ann.x1, ann.y1, ann.x2, ann.y2 = minx, miny, maxx, maxy
+            self.refresh_display()
+            return
         if self._drag_current is None:
             super().mouseMoveEvent(event)
             return
@@ -377,6 +611,12 @@ class AnnotatedPreviewLabel(QLabel):
         self.refresh_display()
 
     def mouseReleaseEvent(self, event):
+        if self._drag_mode is not None:
+            self._drag_mode = None
+            self._drag_idx = None
+            self._drag_offset = None
+            self.annotations_changed.emit()
+            return
         if self._drag_current is None or event.button() != Qt.LeftButton:
             super().mouseReleaseEvent(event)
             return
@@ -387,7 +627,9 @@ class AnnotatedPreviewLabel(QLabel):
         dy = abs(self._drag_current.y2 - self._drag_current.y1)
         if dx > 0.008 or dy > 0.008:
             self.annotations.append(self._drag_current)
+            self.selected_idx = len(self.annotations) - 1
             self.annotations_changed.emit()
+            self.selection_changed.emit()
         self._drag_current = None
         self.refresh_display()
 
@@ -398,8 +640,60 @@ class AnnotatedPreviewLabel(QLabel):
         if self._drag_current is not None:
             active.append(self._drag_current)
         composed = render_annotations_on_qimage(
-            self._base_qimage, active, caption_text=self._caption_preview
+            self._base_qimage, active, caption_text=self._caption_preview,
+            caption_position=self.caption_position,
         )
+        # Draw non-exported selection outline + resize handles for the selected markup
+        sel_idx = self.selected_idx
+        if 0 <= sel_idx < len(self.annotations) and self.annotations[sel_idx].is_visible_at(self.current_sec):
+            ann = self.annotations[sel_idx]
+            w, h = composed.width(), composed.height()
+            scale = max(1.0, min(w, h) / 720.0)
+            ps = QPainter(composed)
+            ps.setRenderHint(QPainter.Antialiasing, True)
+            handle_r = 6 * scale
+            dash_pen = QPen(QColor(255, 255, 255, 230), max(1.2, 1.5 * scale), Qt.DashLine)
+            ps.setBrush(Qt.NoBrush)
+            if ann.kind == "text":
+                font = QFont(
+                    ann.font_family or "Helvetica Neue",
+                    max(8, int(round((ann.font_size or 26) * scale))),
+                )
+                font.setBold(True)
+                fm = QFontMetrics(font)
+                tw = fm.horizontalAdvance(ann.text or "")
+                th = fm.height()
+                pad_x, pad_y = 10 * scale, 6 * scale
+                px1, py1 = ann.x1 * w, ann.y1 * h
+                box = QRectF(
+                    max(4.0, min(px1, w - tw - pad_x * 2 - 4.0)),
+                    max(4.0, min(py1 - th / 2.0, h - th - pad_y * 2 - 4.0)),
+                    tw + pad_x * 2, th + pad_y * 2,
+                )
+                ps.setPen(dash_pen)
+                ps.drawRect(box.adjusted(-4 * scale, -4 * scale, 4 * scale, 4 * scale))
+                ps.setPen(Qt.NoPen)
+                ps.setBrush(QColor("#2a6ada"))
+                ps.drawEllipse(QPointF(px1, py1), handle_r, handle_r)
+            elif ann.kind == "arrow":
+                px1, py1 = ann.x1 * w, ann.y1 * h
+                px2, py2 = ann.x2 * w, ann.y2 * h
+                ps.setPen(dash_pen)
+                ps.drawLine(QPointF(px1, py1), QPointF(px2, py2))
+                ps.setPen(Qt.NoPen)
+                ps.setBrush(QColor("#2a6ada"))
+                ps.drawEllipse(QPointF(px1, py1), handle_r, handle_r)
+                ps.drawEllipse(QPointF(px2, py2), handle_r, handle_r)
+            else:
+                minx, miny, maxx, maxy = self._bbox(ann)
+                rx1, ry1, rx2, ry2 = minx * w, miny * h, maxx * w, maxy * h
+                ps.setPen(dash_pen)
+                ps.drawRect(QRectF(rx1, ry1, rx2 - rx1, ry2 - ry1))
+                ps.setPen(Qt.NoPen)
+                ps.setBrush(QColor("#2a6ada"))
+                for hx, hy in self._handle_points(rx1, ry1, rx2, ry2).values():
+                    ps.drawEllipse(QPointF(hx, hy), handle_r, handle_r)
+            ps.end()
         # Draw non-exported preview HUD badges for active Markup & Freeze Hold
         hud_pills = []
         if active:
@@ -410,16 +704,7 @@ class AnnotatedPreviewLabel(QLabel):
                 hud_pills.append(
                     ("#ff9f0a", f"🖍 Markup ON: {last_a.start_sec:.2f}s → {min(self.video_duration, last_a.end_sec):.2f}s")
                 )
-        if self.freeze_at is not None and self.freeze_duration > 0:
-            end_hold = self.freeze_at + self.freeze_duration
-            if abs(self.current_sec - self.freeze_at) <= 0.08:
-                hud_pills.append(
-                    ("#00d2ff", f"❄️ HOLD HERE: {self.freeze_at:.2f}s → +{self.freeze_duration:.1f}s (Ends {end_hold:.2f}s)")
-                )
-            else:
-                hud_pills.append(
-                    ("#2a6ada", f"❄️ Hold Set @ {self.freeze_at:.2f}s (+{self.freeze_duration:.1f}s)")
-                )
+        at_hold_point = self.active_hold is not None
         if hud_pills:
             w, h = composed.width(), composed.height()
             scale = max(1.0, min(w, h) / 720.0)
@@ -445,6 +730,28 @@ class AnnotatedPreviewLabel(QLabel):
                 p.drawText(rect, Qt.AlignCenter, label_txt)
                 y_off += int(th + pad_y * 2 + 6 * scale)
             p.end()
+        if at_hold_point:
+            w, h = composed.width(), composed.height()
+            scale = max(1.0, min(w, h) / 720.0)
+            _hold, remaining = self.active_hold
+            text = f"❄️  ON HOLD  —  {remaining:0.1f}s left to place markups"
+            font = QFont("Helvetica Neue", max(16, int(round(22 * scale))))
+            font.setBold(True)
+            p3 = QPainter(composed)
+            p3.setRenderHint(QPainter.Antialiasing, True)
+            p3.setFont(font)
+            fm3 = QFontMetrics(font)
+            tw = fm3.horizontalAdvance(text)
+            th = fm3.height()
+            pad_x = 22 * scale
+            pad_y = 12 * scale
+            box = QRectF((w - (tw + pad_x * 2)) / 2.0, 14 * scale, tw + pad_x * 2, th + pad_y * 2)
+            p3.setPen(QPen(QColor("#ffffff"), max(2.0, 2.5 * scale)))
+            p3.setBrush(QColor(0, 150, 215, 235))
+            p3.drawRoundedRect(box, 10 * scale, 10 * scale)
+            p3.setPen(QColor("#ffffff"))
+            p3.drawText(box, Qt.AlignCenter, text)
+            p3.end()
         pixmap = QPixmap.fromImage(composed)
         scaled = pixmap.scaled(
             self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
@@ -460,8 +767,12 @@ class TimelineMapBar(QWidget):
     trim_in_changed = pyqtSignal(float)
     trim_out_changed = pyqtSignal(float)
     playhead_scrubbed = pyqtSignal(float)
+    playhead_drag_started = pyqtSignal()
+    playhead_drag_finished = pyqtSignal()
     markup_span_changed = pyqtSignal(int, float, float)
-    freeze_moved = pyqtSignal(float)
+    markup_selected = pyqtSignal(int)
+    hold_selected = pyqtSignal(int)
+    hold_moved = pyqtSignal(int, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -469,18 +780,21 @@ class TimelineMapBar(QWidget):
         self.setMouseTracking(True)
         self.setToolTip(
             "Drag the green [ In or Out ] lines to adjust trim (or double-click a green line to reset it).\n"
-            "Drag colored Markup bars or the cyan Hold bar to move/resize them, or click anywhere to scrub."
+            "Drag colored Markup bars to move/resize them, drag a cyan Hold block to reposition it,\n"
+            "or click anywhere else to scrub."
         )
         self.duration = 0.0
         self.current_sec = 0.0
         self.trim_in = 0.0
         self.trim_out = 0.0
         self.annotations = []
-        self.freeze_at = None
-        self.freeze_duration = 0.0
+        self.holds = []  # [{"id": int, "at": source_sec, "duration": sec}, ...]
+        self.active_hold_id = None
+        self.active_hold_progress = 0.0
         self.cuts = []
-        self._drag_mode = None  # 'in', 'out', 'playhead', 'markup_move', 'markup_end', 'freeze'
+        self._drag_mode = None  # 'in', 'out', 'playhead', 'markup_move', 'markup_end', 'hold_move'
         self._drag_ann_idx = -1
+        self._drag_hold_id = None
         self._drag_offset_sec = 0.0
 
     def update_state(
@@ -490,8 +804,7 @@ class TimelineMapBar(QWidget):
         trim_in,
         trim_out,
         annotations,
-        freeze_at,
-        freeze_duration,
+        holds,
         cuts,
     ):
         self.duration = max(0.01, float(duration or 0.01))
@@ -499,22 +812,65 @@ class TimelineMapBar(QWidget):
         self.trim_in = float(trim_in or 0.0)
         self.trim_out = float(trim_out if trim_out is not None else self.duration)
         self.annotations = list(annotations or [])
-        self.freeze_at = freeze_at
-        self.freeze_duration = float(freeze_duration or 0.0)
+        self.holds = list(holds or [])
         self.cuts = list(cuts or [])
         self.update()
 
-    def _sec_to_x(self, sec):
+    def set_active_hold_progress(self, hold_id, fraction):
+        self.active_hold_id = hold_id
+        self.active_hold_progress = max(0.0, min(1.0, fraction))
+        self.update()
+
+    def _hold_by_id(self, hold_id):
+        return next((h for h in self.holds if h.get("id") == hold_id), None)
+
+    def _virtual_duration(self):
+        return max(0.01, self.duration + sum(h["duration"] for h in self.holds))
+
+    def _source_to_virtual(self, sec):
+        """Map a source-video second to its position on the (longer) virtual timeline,
+        accounting for every hold inserted strictly before it."""
+        sec = float(sec or 0.0)
+        offset = sum(h["duration"] for h in self.holds if h["at"] < sec)
+        return sec + offset
+
+    def _vsec_to_x(self, vsec):
         w = max(1, self.width() - 16)
-        denom = max(0.01, float(self.duration or 0.01))
-        ratio = max(0.0, min(1.0, float(sec or 0.0) / denom))
+        ratio = max(0.0, min(1.0, float(vsec or 0.0) / self._virtual_duration()))
         return 8.0 + ratio * w
 
-    def _x_to_sec(self, x):
+    def _sec_to_x(self, sec):
+        return self._vsec_to_x(self._source_to_virtual(sec))
+
+    def _x_to_vsec(self, x):
         w = max(1, self.width() - 16)
-        denom = max(0.01, float(self.duration or 0.01))
         ratio = max(0.0, min(1.0, (float(x) - 8.0) / w))
-        return round(ratio * denom, 2)
+        return ratio * self._virtual_duration()
+
+    def _vsec_to_source_and_hold(self, vsec):
+        """Inverse of _source_to_virtual: returns (source_sec, hold_or_None) — hold is set
+        when vsec falls inside that hold's inserted (frozen) span."""
+        offset = 0.0
+        prev_source = 0.0
+        for h in sorted(self.holds, key=lambda x: x["at"]):
+            seg_start = prev_source + offset
+            seg_end = h["at"] + offset
+            if vsec < seg_end:
+                return prev_source + (vsec - seg_start), None
+            hold_end = seg_end + h["duration"]
+            if vsec < hold_end:
+                return h["at"], h
+            offset += h["duration"]
+            prev_source = h["at"]
+        return prev_source + (vsec - (prev_source + offset)), None
+
+    def _x_to_sec(self, x):
+        source_sec, _hold = self._vsec_to_source_and_hold(self._x_to_vsec(x))
+        return round(source_sec, 2)
+
+    def _x_to_hold(self, x):
+        _source_sec, hold = self._vsec_to_source_and_hold(self._x_to_vsec(x))
+        return hold
 
     def _hit_test(self, pos):
         if self.duration <= 0.01:
@@ -527,11 +883,10 @@ class TimelineMapBar(QWidget):
             return "out", -1
         if abs(px - x_in) <= 8:
             return "in", -1
-        if self.freeze_at is not None and self.freeze_duration > 0 and py >= self.height() // 2:
-            fx1 = self._sec_to_x(self.freeze_at)
-            fx2 = max(fx1 + 8.0, self._sec_to_x(min(self.duration, self.freeze_at + self.freeze_duration)))
-            if fx1 - 4 <= px <= fx2 + 4:
-                return "freeze", -1
+        if py >= self.height() // 2:
+            hold = self._x_to_hold(px)
+            if hold is not None:
+                return "hold_move", hold["id"]
         for idx in range(len(self.annotations) - 1, -1, -1):
             ann = self.annotations[idx]
             ax1 = self._sec_to_x(max(0.0, ann.start_sec))
@@ -549,13 +904,21 @@ class TimelineMapBar(QWidget):
             return
         mode, idx = self._hit_test(event.pos())
         self._drag_mode = mode
-        self._drag_ann_idx = idx
+        self._drag_ann_idx = idx if mode in ("markup_move", "markup_end") else -1
+        self._drag_hold_id = idx if mode == "hold_move" else None
         sec = self._x_to_sec(event.pos().x())
         if mode == "markup_move" and 0 <= idx < len(self.annotations):
             self._drag_offset_sec = sec - self.annotations[idx].start_sec
-        elif mode == "freeze" and self.freeze_at is not None:
-            self._drag_offset_sec = sec - self.freeze_at
+            self.markup_selected.emit(idx)
+        elif mode == "markup_end" and 0 <= idx < len(self.annotations):
+            self.markup_selected.emit(idx)
+        elif mode == "hold_move" and self._drag_hold_id is not None:
+            h = self._hold_by_id(self._drag_hold_id)
+            if h:
+                self._drag_offset_sec = sec - h["at"]
+                self.hold_selected.emit(self._drag_hold_id)
         elif mode == "playhead":
+            self.playhead_drag_started.emit()
             self.playhead_scrubbed.emit(sec)
         self.update()
 
@@ -567,7 +930,7 @@ class TimelineMapBar(QWidget):
             mode, _ = self._hit_test(event.pos())
             if mode in ("in", "out", "markup_end"):
                 self.setCursor(Qt.SplitHCursor)
-            elif mode in ("markup_move", "freeze"):
+            elif mode in ("markup_move", "hold_move"):
                 self.setCursor(Qt.OpenHandCursor)
             else:
                 self.setCursor(Qt.PointingHandCursor)
@@ -593,15 +956,19 @@ class TimelineMapBar(QWidget):
             span = max(0.2, min(self.duration, ann.end_sec) - ann.start_sec)
             new_start = max(0.0, min(self.duration - span, sec - self._drag_offset_sec))
             self.markup_span_changed.emit(self._drag_ann_idx, round(new_start, 2), round(new_start + span, 2))
-        elif self._drag_mode == "freeze" and self.freeze_at is not None:
-            new_f = max(0.0, min(self.duration, round(sec - self._drag_offset_sec, 2)))
-            self.freeze_moved.emit(new_f)
+        elif self._drag_mode == "hold_move" and self._drag_hold_id is not None:
+            new_at = max(0.0, min(self.duration, round(sec - self._drag_offset_sec, 2)))
+            self.hold_moved.emit(self._drag_hold_id, new_at)
         self.update()
 
     def mouseReleaseEvent(self, event):
+        was_scrubbing_playhead = self._drag_mode == "playhead"
         self._drag_mode = None
         self._drag_ann_idx = -1
+        self._drag_hold_id = None
         super().mouseReleaseEvent(event)
+        if was_scrubbing_playhead:
+            self.playhead_drag_finished.emit()
 
     def mouseDoubleClickEvent(self, event):
         if self.duration <= 0.01:
@@ -668,16 +1035,27 @@ class TimelineMapBar(QWidget):
                 painter.setBrush(c)
                 painter.drawRoundedRect(QRectF(ax1, 4, ax2 - ax1, 8), 2, 2)
 
-            # Freeze hold marker & span (bottom lane — always drawn brightly on top!)
-            if self.freeze_at is not None and self.freeze_duration > 0:
-                fx1 = self._sec_to_x(self.freeze_at)
-                fx2 = max(fx1 + 8.0, self._sec_to_x(min(self.duration, self.freeze_at + self.freeze_duration)))
-                painter.setPen(QPen(QColor("#ffffff"), 1.2))
-                painter.setBrush(QColor(0, 210, 255, 225))
+            # Hold blocks (bottom lane — each inserted freeze widens the ruler at its spot)
+            for hold in self.holds:
+                v_start = self._source_to_virtual(hold["at"])
+                fx1 = self._vsec_to_x(v_start)
+                fx2 = max(fx1 + 8.0, self._vsec_to_x(v_start + hold["duration"]))
+                selected = hold["id"] == self.active_hold_id
+                painter.setPen(QPen(QColor("#ffffff"), 1.6 if selected else 1.2))
+                painter.setBrush(QColor(0, 210, 255, 235 if selected else 200))
                 painter.drawRoundedRect(QRectF(fx1, h - 12, fx2 - fx1, 8), 2, 2)
 
-            # Playhead line
-            px = self._sec_to_x(self.current_sec)
+            # Playhead line — interpolates across an active hold's inserted span while it's playing
+            if self.active_hold_id is not None:
+                active = self._hold_by_id(self.active_hold_id)
+                if active is not None:
+                    v_start = self._source_to_virtual(active["at"])
+                    vsec = v_start + active["duration"] * self.active_hold_progress
+                    px = self._vsec_to_x(vsec)
+                else:
+                    px = self._sec_to_x(self.current_sec)
+            else:
+                px = self._sec_to_x(self.current_sec)
             painter.setPen(QPen(QColor("#ffffff"), 2.2))
             painter.drawLine(QPointF(px, 1), QPointF(px, h - 1))
         finally:
@@ -770,6 +1148,145 @@ def _has_audio_stream(ffmpeg, video_path):
         return False
 
 
+def _build_mixed_audio_graph(
+    ffmpeg, video_path, s_sec, e_sec, total_clip_dur,
+    holds,
+    narration_path, narration_mode, fade_in, fade_out,
+    video_input_idx=1,
+):
+    """Build the ffmpeg -i args, filter_complex parts, and output label that mix
+    original + narration audio. Shared by file export and the live Preview's
+    audio-only mix, so a fix to one never silently misses the other.
+
+    `video_input_idx` is where `video_path`'s own audio-source `-i` lands in the
+    final argv (callers that also feed a separately pre-rendered video stream as
+    input 0 pass 1; a pure audio-only render passes 0).
+
+    `holds` is a list of {"at": source_sec, "duration": sec} already filtered to
+    those within [s_sec, e_sec] and sorted ascending by "at" — each one gets a
+    silent gap spliced into the audio at the matching point in the frozen-frame
+    video (see export_video_or_gif), so audio and video insert points line up.
+    """
+    has_src_audio = _has_audio_stream(ffmpeg, video_path)
+    has_narr = bool(narration_path and os.path.isfile(narration_path))
+    if not has_src_audio and not has_narr:
+        return [], [], None
+
+    has_freeze = bool(holds)
+    v = video_input_idx
+    extra_inputs = []
+    filter_parts = []
+    audio_out_label = None
+
+    if has_src_audio and (not has_narr or narration_mode in ("duck", "mix")):
+        if has_freeze:
+            extra_inputs += ["-i", video_path]
+            # Short fades at each silence boundary — a hard cut to/from dead silence
+            # is an audible click; ramping it over 50ms removes the discontinuity.
+            # Walk the clip as alternating [source segment][silence] pairs, one per
+            # hold, ending on a final source segment — then concat them all.
+            concat_labels = []
+            cursor = s_sec
+            for i, hold in enumerate(holds):
+                seg_start, seg_end = cursor, hold["at"]
+                seg_dur = max(0.0, seg_end - seg_start)
+                if seg_dur > 0.001:
+                    fade_dur = min(0.05, seg_dur)
+                    lbl = f"a_seg{i}"
+                    filter_parts.append(
+                        f"[{v}:a]atrim=start={seg_start:.3f}:end={seg_end:.3f},asetpts=PTS-STARTPTS,"
+                        f"afade=t=out:st={max(0.0, seg_dur - fade_dur):.3f}:d={fade_dur:.3f}[{lbl}]"
+                    )
+                    concat_labels.append(f"[{lbl}]")
+                sil_lbl = f"a_sil{i}"
+                filter_parts.append(f"aevalsrc=0:d={hold['duration']:.3f}[{sil_lbl}]")
+                concat_labels.append(f"[{sil_lbl}]")
+                cursor = hold["at"]
+            tail_dur = max(0.0, e_sec - cursor)
+            if tail_dur > 0.001:
+                fade_dur = min(0.05, tail_dur)
+                lbl = f"a_seg{len(holds)}"
+                filter_parts.append(
+                    f"[{v}:a]atrim=start={cursor:.3f}:end={e_sec:.3f},asetpts=PTS-STARTPTS,"
+                    f"afade=t=in:st=0:d={fade_dur:.3f}[{lbl}]"
+                )
+                concat_labels.append(f"[{lbl}]")
+            filter_parts.append(f"{''.join(concat_labels)}concat=n={len(concat_labels)}:v=0:a=1[src_a]")
+        else:
+            extra_inputs += ["-ss", f"{s_sec:.3f}", "-to", f"{e_sec:.3f}", "-i", video_path]
+            filter_parts.append(f"[{v}:a]asetpts=PTS-STARTPTS[src_a]")
+        audio_out_label = "[src_a]"
+
+    if has_narr:
+        narr_idx = v + 1 if (has_src_audio and narration_mode in ("duck", "mix")) else v
+        extra_inputs += ["-i", narration_path]
+        if audio_out_label and narration_mode in ("duck", "mix"):
+            vol = "0.22" if narration_mode == "duck" else "1.0"
+            # Pad/trim narration to exactly match the base track's length so amix never
+            # has one input end before the other — that mismatch is what caused the
+            # audible click (dropout_transition=0 made the cutoff instant).
+            filter_parts.append(
+                f"{audio_out_label}volume={vol}[ducked];"
+                f"[{narr_idx}:a]apad,atrim=0:{total_clip_dur:.3f},asetpts=PTS-STARTPTS[narr];"
+                f"[ducked][narr]amix=inputs=2:duration=first:dropout_transition=0[mixed_a]"
+            )
+            audio_out_label = "[mixed_a]"
+        else:
+            filter_parts.append(f"[{narr_idx}:a]asetpts=PTS-STARTPTS[narr_a]")
+            audio_out_label = "[narr_a]"
+
+    af_tail = []
+    if fade_in and fade_in > 0:
+        af_tail.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+    if fade_out and fade_out > 0:
+        st = max(0.0, total_clip_dur - fade_out)
+        af_tail.append(f"afade=t=out:st={st:.2f}:d={fade_out:.2f}")
+    if af_tail:
+        filter_parts.append(f"{audio_out_label}{','.join(af_tail)}[final_a]")
+        audio_out_label = "[final_a]"
+
+    return extra_inputs, filter_parts, audio_out_label
+
+
+def build_preview_audio(
+    ffmpeg, video_path, out_path, start_sec, end_sec,
+    narration_path=None, narration_mode="duck",
+    holds=None,
+):
+    """Render just the mixed audio (original + narration, respecting Duck/Mix/Replace)
+    for `[start_sec, end_sec]` — the same mix Export would produce — without
+    re-encoding any video, so Preview playback can monitor it live.
+    Returns None if there's no source audio and no narration to play.
+    """
+    s_sec = max(0.0, float(start_sec or 0.0))
+    e_sec = float(end_sec) if (end_sec is not None and end_sec > s_sec) else s_sec + 0.1
+    holds = sorted(
+        [h for h in (holds or []) if s_sec <= h["at"] <= e_sec],
+        key=lambda h: h["at"],
+    )
+    total_clip_dur = (e_sec - s_sec) + sum(h["duration"] for h in holds)
+
+    extra_inputs, filter_parts, audio_out_label = _build_mixed_audio_graph(
+        ffmpeg, video_path, s_sec, e_sec, total_clip_dur,
+        holds,
+        narration_path, narration_mode, 0.0, 0.0,
+        video_input_idx=0,
+    )
+    if audio_out_label is None:
+        return None
+
+    cmd = [ffmpeg, "-y", "-hide_banner", "-nostdin"] + extra_inputs + [
+        "-filter_complex", ";".join(filter_parts),
+        "-map", audio_out_label, "-vn",
+        "-c:a", "aac", "-b:a", "192k",
+        out_path,
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip()[-400:])
+    return out_path
+
+
 def export_audio_clip(ffmpeg, video_path, out_path, start_sec=0.0, end_sec=None,
                       fade_in=0.0, fade_out=0.0, fmt="mp3", bitrate=192):
     """Extract audio (MP3 or WAV) from `[start_sec, end_sec]` with optional fade in/out."""
@@ -793,7 +1310,8 @@ def export_audio_clip(ffmpeg, video_path, out_path, start_sec=0.0, end_sec=None,
     if fmt.lower() == "wav":
         cmd += ["-c:a", "pcm_s16le", out_path]
     else:
-        cmd += ["-c:a", "libmp3lame", "-b:a", f"{int(bitrate)}k", out_path]
+        kbps = int(str(bitrate).lower().rstrip("k"))
+        cmd += ["-c:a", "libmp3lame", "-b:a", f"{kbps}k", out_path]
 
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
@@ -810,15 +1328,15 @@ def export_video_or_gif(
     fade_in=0.0,
     fade_out=0.0,
     annotations=None,
-    freeze_at=None,
-    freeze_duration=0.0,
+    holds=None,
     captions=None,
+    caption_position="bottom",
     narration_path=None,
     narration_mode="duck",  # 'duck', 'replace', or 'mix'
     as_gif=False,
     gif_fps=12,
     gif_width=480,
-    mp4_quality="high",  # 'high', 'medium', 'small'
+    mp4_quality="original",  # "original", "2160p", "1440p", "1080p", "720p", "540p", "360p", "240p"
 ):
     """Render a trimmed MP4 or palette-optimized GIF with optional markup, freeze-frame hold,
     fade in/out, burned-in captions, and voiceover narration.
@@ -838,12 +1356,11 @@ def export_video_or_gif(
 
     annotations = list(annotations or [])
     captions = list(captions or [])
-    has_freeze = (
-        freeze_at is not None
-        and freeze_duration
-        and freeze_duration > 0
-        and s_sec <= freeze_at <= e_sec
+    holds = sorted(
+        [h for h in (holds or []) if s_sec <= h["at"] <= e_sec],
+        key=lambda h: h["at"],
     )
+    has_freeze = bool(holds)
 
     def active_caption(sec):
         for cue in captions:
@@ -851,22 +1368,19 @@ def export_video_or_gif(
                 return cue.text
         return None
 
-    crf_val = "18"
+    crf_val = "16"
     max_h = 0
     if not as_gif:
-        if mp4_quality == "medium":
-            crf_val = "23"
-            max_h = 720
-        elif mp4_quality == "small":
-            crf_val = "28"
-            max_h = 480
+        crf_val, max_h = MP4_QUALITY_TIERS.get(mp4_quality, MP4_QUALITY_TIERS["original"])
 
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_video = os.path.join(tmpdir, "rendered_video.mp4")
         start_f = max(0, int(round(s_sec * fps)))
         end_f = min(max(start_f, total_frames - 1), int(round(e_sec * fps)))
-        freeze_f = int(round(freeze_at * fps)) if has_freeze else -1
-        freeze_hold_frames = int(round(freeze_duration * fps)) if has_freeze else 0
+        hold_frames = [
+            {"frame": int(round(h["at"] * fps)), "hold_frames": int(round(h["duration"] * fps))}
+            for h in holds
+        ]
 
         target_w, target_h = width, height
         if max_h > 0 and height > max_h:
@@ -875,7 +1389,7 @@ def export_video_or_gif(
             target_h = max_h
         out_w = target_w if target_w % 2 == 0 else target_w - 1
         out_h = target_h if target_h % 2 == 0 else target_h - 1
-        total_out_frames = (end_f - start_f + 1) + (freeze_hold_frames if has_freeze else 0)
+        total_out_frames = (end_f - start_f + 1) + sum(hf["hold_frames"] for hf in hold_frames)
         fade_in_frames = int(round(fade_in * fps)) if fade_in > 0 else 0
         fade_out_frames = int(round(fade_out * fps)) if fade_out > 0 else 0
 
@@ -891,7 +1405,7 @@ def export_video_or_gif(
         proc = subprocess.Popen(encode_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_f)
         out_idx = 0
-        frozen_done = False
+        hold_ptr = 0
 
         def apply_fade(bgr, idx):
             factor = 1.0
@@ -919,19 +1433,21 @@ def export_video_or_gif(
 
                 # Show any markup whose [start_sec, end_sec] window includes cur_sec
                 visible_now = [a for a in annotations if a.is_visible_at(cur_sec)]
-                composed = render_annotations_on_bgr(frame, visible_now, caption_text=cap_text)
+                composed = render_annotations_on_bgr(frame, visible_now, caption_text=cap_text, caption_position=caption_position)
                 composed = apply_fade(composed, out_idx)
                 proc.stdin.write(composed.tobytes())
                 out_idx += 1
 
-                if has_freeze and not frozen_done and f_idx >= freeze_f:
-                    frozen_done = True
-                    freeze_anns = [a for a in annotations if a.is_visible_at(freeze_at)] or annotations
-                    freeze_frame = render_annotations_on_bgr(frame, freeze_anns, caption_text=cap_text)
-                    for _ in range(freeze_hold_frames):
+                while hold_ptr < len(hold_frames) and f_idx >= hold_frames[hold_ptr]["frame"]:
+                    hf = hold_frames[hold_ptr]
+                    hold_sec = hf["frame"] / fps
+                    freeze_anns = [a for a in annotations if a.is_visible_at(hold_sec)] or annotations
+                    freeze_frame = render_annotations_on_bgr(frame, freeze_anns, caption_text=cap_text, caption_position=caption_position)
+                    for _ in range(hf["hold_frames"]):
                         faded = apply_fade(freeze_frame, out_idx)
                         proc.stdin.write(faded.tobytes())
                         out_idx += 1
+                    hold_ptr += 1
         finally:
             cap.release()
             if proc.stdin:
@@ -960,57 +1476,19 @@ def export_video_or_gif(
             return out_path
 
         # Build audio track for MP4
-        has_src_audio = _has_audio_stream(ffmpeg, video_path)
-        has_narr = bool(narration_path and os.path.isfile(narration_path))
         total_clip_dur = out_idx / fps if fps > 0 else (e_sec - s_sec)
+        extra_inputs, filter_parts, audio_out_label = _build_mixed_audio_graph(
+            ffmpeg, video_path, s_sec, e_sec, total_clip_dur,
+            holds,
+            narration_path, narration_mode, fade_in, fade_out,
+            video_input_idx=1,
+        )
 
-        if not has_src_audio and not has_narr:
+        if audio_out_label is None:
             shutil.move(raw_video, out_path)
             return out_path
 
-        mux_cmd = [ffmpeg, "-y", "-hide_banner", "-nostdin", "-i", raw_video]
-        filter_parts = []
-        audio_out_label = None
-
-        if has_src_audio and (not has_narr or narration_mode in ("duck", "mix")):
-            if has_freeze:
-                post_start = freeze_at
-                mux_cmd += ["-i", video_path]
-                filter_parts.append(
-                    f"[1:a]atrim=start={s_sec:.3f}:end={freeze_at:.3f},asetpts=PTS-STARTPTS[a_pre];"
-                    f"aevalsrc=0:d={freeze_duration:.3f}[a_sil];"
-                    f"[1:a]atrim=start={post_start:.3f}:end={e_sec:.3f},asetpts=PTS-STARTPTS[a_post];"
-                    f"[a_pre][a_sil][a_post]concat=n=3:v=0:a=1[src_a]"
-                )
-            else:
-                mux_cmd += ["-ss", f"{s_sec:.3f}", "-to", f"{e_sec:.3f}", "-i", video_path]
-                filter_parts.append("[1:a]asetpts=PTS-STARTPTS[src_a]")
-            audio_out_label = "[src_a]"
-
-        if has_narr:
-            narr_idx = 2 if (has_src_audio and narration_mode in ("duck", "mix")) else 1
-            mux_cmd += ["-i", narration_path]
-            if audio_out_label and narration_mode in ("duck", "mix"):
-                vol = "0.22" if narration_mode == "duck" else "1.0"
-                filter_parts.append(
-                    f"{audio_out_label}volume={vol}[ducked];"
-                    f"[{narr_idx}:a]asetpts=PTS-STARTPTS[narr];"
-                    f"[ducked][narr]amix=inputs=2:duration=first:dropout_transition=0[mixed_a]"
-                )
-                audio_out_label = "[mixed_a]"
-            else:
-                filter_parts.append(f"[{narr_idx}:a]asetpts=PTS-STARTPTS[narr_a]")
-                audio_out_label = "[narr_a]"
-
-        af_tail = []
-        if fade_in and fade_in > 0:
-            af_tail.append(f"afade=t=in:st=0:d={fade_in:.2f}")
-        if fade_out and fade_out > 0:
-            st = max(0.0, total_clip_dur - fade_out)
-            af_tail.append(f"afade=t=out:st={st:.2f}:d={fade_out:.2f}")
-        if af_tail:
-            filter_parts.append(f"{audio_out_label}{','.join(af_tail)}[final_a]")
-            audio_out_label = "[final_a]"
+        mux_cmd = [ffmpeg, "-y", "-hide_banner", "-nostdin", "-i", raw_video] + extra_inputs
 
         mux_cmd += [
             "-filter_complex", ";".join(filter_parts),
@@ -1034,7 +1512,7 @@ def split_video_by_cuts(
     fade_out=0.0,
     start_sec=0.0,
     end_sec=None,
-    mp4_quality="high",
+    mp4_quality="original",
     progress_cb=None,
 ):
     """Split `video_path` at `cut_seconds` within `[start_sec, end_sec]` into numbered
@@ -1065,7 +1543,7 @@ def split_video_by_cuts(
     os.makedirs(out_folder, exist_ok=True)
     stem = os.path.splitext(os.path.basename(video_path))[0]
     created = []
-    crf_val = {"high": "18", "medium": "23", "small": "28"}.get(mp4_quality, "18")
+    crf_val, _ = MP4_QUALITY_TIERS.get(mp4_quality, MP4_QUALITY_TIERS["original"])
 
     for idx, (s_sec, e_sec) in enumerate(segments, 1):
         if progress_cb:
@@ -1073,7 +1551,7 @@ def split_video_by_cuts(
         out_path = os.path.join(
             out_folder, f"{stem}_segment_{idx:03d}_{s_sec:.2f}s-{e_sec:.2f}s.mp4"
         )
-        if fade_in > 0 or fade_out > 0 or mp4_quality != "high":
+        if fade_in > 0 or fade_out > 0 or mp4_quality != "original":
             export_video_or_gif(
                 ffmpeg, video_path, out_path,
                 start_sec=s_sec, end_sec=e_sec,
