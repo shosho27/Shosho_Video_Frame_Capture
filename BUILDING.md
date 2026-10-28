@@ -1,8 +1,30 @@
 # Building and Distributing Video Frame Capture
 
-Build on an Apple Silicon Mac. The finished app includes Python, PyQt5, OpenCV,
-yt-dlp, its JavaScript solver, Deno, and FFmpeg. Users do not need Python,
-Homebrew, or a separate FFmpeg installation.
+Build on an Apple Silicon Mac. There are two builds.
+
+### Day-to-day app
+
+This is the app Shane launches. It does not bundle Deno. YouTube uses the Deno
+or Node already installed on the Mac. X and Facebook downloads and the contact
+sheet were confirmed with this build on October 15, 2026.
+
+```bash
+cd /Users/sashornock/Documents/Scripts/ScriptProduction/Shosho_Video_Frame_Capture
+.venv/bin/pyinstaller "Video Frame Capture.spec" --noconfirm
+codesign --deep --force --sign - "dist/Video Frame Capture.app"
+codesign --verify --deep --strict "dist/Video Frame Capture.app"
+ditto "dist/Video Frame Capture.app" "$HOME/Apps/Video Frame Capture.app"
+```
+
+Quit the running app before launching the new one. The Desktop alias points at
+`dist/`. `~/Apps` is a copy.
+
+### Full bundle
+
+`build_app.py` includes Python, PyQt5, OpenCV, yt-dlp, its JavaScript solver,
+Deno, and FFmpeg. That app does not need Homebrew. It has not been rebuilt for
+the October 15 contact-sheet and download fixes. Use it when the app has to run
+on a Mac that does not already have Deno and FFmpeg.
 
 ```bash
 cd /Users/sashornock/Documents/Scripts/ScriptProduction/Shosho_Video_Frame_Capture

@@ -1,11 +1,34 @@
 # Video Frame Capture: merge handoff
 
+## Status — October 15, 2026, after Shane's test
+
+Shane confirmed two things in the launched app:
+
+- The contact sheet layout is right, including one frame centered on the page and Portrait as a tall sheet.
+- An X video downloaded, and a Facebook video downloaded.
+
+That app is the `Video Frame Capture.spec` build, copied to
+`~/Apps/Video Frame Capture.app`. It is not the `build_app.py` bundle.
+
+Git:
+
+- Integration branch `codex/video-frame-capture-combined` is on GitHub at `13bf156`.
+- `main` is still `cbc7efa` (July 31). Nothing from this work is on `main`.
+- Local work on top of `13bf156` is not committed: contact-sheet centering and the portrait preview, blank-opening lookahead, black-border trim, Homebrew Deno lookup when Finder's PATH is empty, the tests for those, and the October 15 doc updates.
+- `QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v` passed 35 tests on October 15 after those edits.
+
+Do not merge `13bf156` by itself. That commit is missing the sheet Shane approved and the Deno lookup used for the downloads he tested.
+
+Not part of the October 15 test: YouTube, Instagram, TikTok, MKV conversion, and the Update Downloader button. `build_app.py`, which bundles Deno and FFmpeg, has not been rebuilt. The spec app finds Deno at `/opt/homebrew/bin/deno`.
+
+A merge to `main` is reasonable after this local work is committed and pushed to `codex/video-frame-capture-combined`. It is not reasonable from the current GitHub tip.
+
 ## Combined on the work computer — October 15, 2026
 
 The work-computer baseline is `work-computer-contact-sheet` (`ad8d04a`): the
 speed-audit frame reads, the Video Frame Capture rename, Show in Finder, and
 the contact sheet. The home download work is `origin/codex/video-frame-capture-downloads`
-(`ff21f1c`). They are combined on `codex/video-frame-capture-combined`.
+(`ff21f1c`). They are combined on `codex/video-frame-capture-combined` (`13bf156`).
 
 Kept from the work computer: single, batch, interval, and scene capture; the
 contact sheet (batch timecodes or a folder of stills, page preview, one PDF at
@@ -17,18 +40,24 @@ with the original kept, and the downloader update. Settings stay
 `~/Library/Application Support/Shosho/VideoFrameCapture/`. The internal worker
 flag stays `--shosho-download`.
 
-`QT_QPA_PLATFORM=offscreen .venv/bin/python -m unittest discover -s tests -v`
-passed 28 tests on October 15. The packaged app still needs a rebuild with
-`build_app.py` before the download button is in the app you launch.
+The download button is already in the spec-built app Shane launches. X and
+Facebook were confirmed there on October 15. `build_app.py` is still the
+unrebuilt full bundle for a machine without Homebrew.
 
 Saved October 14, 2026 (America/Chicago). The sections below are the original
 instructions from the home computer.
 
-## Start here on the work computer — October 15, 2026
+## Original home-computer instructions — October 15, 2026
 
-The user wants to combine the work created in this session with the earlier
-version created on their **work computer**. That work-computer version has not
-been inspected in this session, and its commit, branch, and location are unknown.
+The combine described below is done. The work-computer version is
+`work-computer-contact-sheet` (`ad8d04a`). Follow the status section at the top.
+Do not treat that version as missing, and do not merge `13bf156` until the
+later local fixes are committed.
+
+The user wanted to combine the work created in this session with the earlier
+version created on their **work computer**. At the time this section was written,
+that work-computer version had not been inspected, and its commit, branch, and
+location were unknown.
 It may still be uncommitted or exist only on that computer. Do not replace that
 checkout with this branch or assume an older GitHub branch contains that work.
 
@@ -88,9 +117,9 @@ the two versions have been merged.
 ## Product name
 
 The user confirmed the product should be called **Video Frame Capture**.
-The current source and packaged app still contain the old **Shosho Video Frame
-Capture** name. Apply the rename when combining versions; preserve access to
-existing download settings and any installed downloader updates.
+That rename is in the combined branch and in the launched app. The folder,
+bundle id, QSettings namespace, and `--shosho-download` flag stay as they were
+so existing download settings and any installed downloader updates still apply.
 
 ## Versions to compare
 
@@ -102,10 +131,9 @@ existing download settings and any installed downloader updates.
   optional browser cookies; automatic MKV-to-MP4 remux with H.264/AAC fallback;
   original preservation; standalone macOS packaging with FFmpeg, yt-dlp, and Deno;
   plus the downloader-update implementation present in this shared checkout.
-- The user reports another version pushed October 14. It has not been located.
-  At the time of checking, this GitHub repository showed its last push October 9,
-  and had no pull requests or releases. Do not assume the autosync branch is the
-  version the user means. Locate the other repository, branch, chat, or checkout.
+- The October 14 work-computer version is `work-computer-contact-sheet`
+  (`ad8d04a`). It is already in the integration branch. The autosync branch is
+  the October 8 performance work, which that baseline also contains.
 
 ## Merge workflow
 
@@ -154,9 +182,8 @@ existing download settings and any installed downloader updates.
 ## Build state
 
 The standalone app is generated under `dist/` and is intentionally excluded from
-Git. It can be rebuilt from `build_app.py` and `requirements.txt`; Python's
-PyInstaller package and Deno are required on the build machine. The previously
-built app predates the later downloader-update source changes in this checkout;
-rebuild to include those changes. Third-party notices are in the repository.
+Git. The app Shane launches is rebuilt from `Video Frame Capture.spec`.
+`build_app.py` remains the full bundle and has not been run for the October 15
+fixes. Third-party notices are in the repository.
 
-No changes from this snapshot have been merged into main.
+No changes from this work have been merged into `main`. `main` is still `cbc7efa`.

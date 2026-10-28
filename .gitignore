@@ -6,7 +6,9 @@ __pycache__/
 /dist/
 /build/
 *.spec
+src/_build_stamp.py
 assets/ffmpeg
 assets/whisper-*/
 captured_frames/
 /*.app
+/Android/
