@@ -11,11 +11,13 @@
 - `J` / `K` / `L` shuttle transport supporting `-16x` to `+16x` (`1x, 2x, 4x, 8x, 16x`).
 - `Spacebar` dedicated to play/pause with `Qt.NoFocus` on buttons so Spacebar never toggles focused controls.
 
-### Timed On-Video Markup & Hold Frame
+### Timed On-Video Markup, Select/Resize/Delete & Stacking Hold Frame
 **Status:** Done
-- Draw Boxes, Circles, Arrows, Lines, and Text with customizable color and line width.
-- Every markup item has editable `start_sec` and `end_sec` (defaulting to a 3-second range) and can be moved/resized on canvas or timeline.
-- Hold / Freeze Frame (`❄️ Hold`) pauses playback for `N` seconds and renders into exported MP4s; preserved when adjusting Trim Out.
+- Draw Boxes, Circles, Arrows, and Text with customizable color and line width.
+- Every markup item has editable `start_sec` and `end_sec` (defaulting to a 3-second range).
+- Click-to-select with the Pointer tool: dashed bounding box + draggable resize handles (8 for shapes, 2 endpoints for arrows), drag-to-move, Delete/Backspace or the 🗑 button to remove the selected one.
+- Hold Frame (`❄️ Hold`) is a real timeline insert, not a playback pause: click at the playhead, pick a duration, Add drops a frozen-frame segment that extends the total timeline. Multiple holds stack. Holds are click-select/drag-move/Delete on the timeline, same pattern as markups, and render into exported MP4s correctly in sequence.
+- Live playback slaves the displayed frame to the dub/narration audio's actual clock (not a fixed tick counter), so lipsync holds over long clips. The playhead can also be dragged during live playback — it pauses for the drag and resumes from the drop point.
 
 ### Trim, Fade, MP4 Quality, 1-Click MP3 & GIF Export
 **Status:** Done
@@ -31,8 +33,10 @@
 
 ### Voiceover Dub Recording & Offline AI Captions
 **Status:** Done
-- Live microphone dub recording (`🎙 Dub Record`, `🔊 Play`, `📂 Dub File`) synced with video preview playback and adjustable original-audio mix (`0–200%`).
-- Offline Whisper AI speech-to-text transcription (`💬 Captions AI` → `✨ Auto-Transcribe (Offline AI)`) using bundled `faster-whisper` (`tiny.en`), plus `.srt` import/export and subtitle burn-in.
+- Live microphone dub recording (`🎙 Dub Record`, `Play`, `Load`) synced with video preview playback; Duck/Replace/Mix modes for blending with original audio. Requires `NSMicrophoneUsageDescription` in the packaged app's Info.plist or macOS silently denies mic access (fixed 2026-10-28 — was missing, producing silent recordings with no error).
+- Offline Whisper AI speech-to-text transcription (`💬 Captions AI`) using bundled `faster-whisper` (`tiny`). Transcription-only, no speaker diarization.
+- `Burn into video/preview` toggle (captions as data-only vs. rendered), Bottom/Top burn position, non-modal live-highlighting `Cap Text` drawer, `Cap Export` for `.srt` / `.txt` / `.csv`.
+- `faster-whisper` needs `av==16.0.0` pinned in `requirements.txt` — newer `av` removed a kwarg faster-whisper's audio decoder calls, breaking every transcription with a `TypeError`.
 
 ### Still Frame Capture Modes & Organized Subfolders
 **Status:** Done
@@ -43,5 +47,5 @@
 ### Video Import, Link Downloader & Self-Contained macOS App
 **Status:** Done
 - `📂 Import Video(s)`, `📁 Open Folder`, and drag-and-drop support.
-- `🌐 Download Link` (`yt-dlp` + bundled FFmpeg H.264/MP4 conversion + MP3 extraction) and `🔄 Update Engine`.
+- Download Video from Link (`yt-dlp` + bundled FFmpeg H.264/MP4 conversion + MP3 extraction) across 11 platforms: YouTube, Vimeo, X/Twitter, Facebook, Instagram, TikTok, Reddit, Twitch, LinkedIn (including shortened `lnkd.in` links), Dailymotion, Loom. Plus `🔄 Update Engine`.
 - Standalone `dist/Video Frame Capture.app` bundle built with `build_app.py`.
