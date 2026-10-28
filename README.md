@@ -1,6 +1,6 @@
 # Video Frame Capture
 
-A macOS desktop studio for **video editing, timed markup annotations, scene/chapter splitting, voiceover dubbing, offline AI captions, and still frame extraction**.
+A macOS desktop studio for **downloading video from social media, video editing, timed markup annotations, scene/chapter splitting, voiceover dubbing, offline AI captions, and still frame extraction**.
 
 ---
 
