@@ -74,6 +74,7 @@ Located in **Tab 1 (`🎬 Edit, Export (MP4 / MP3 / GIF), Chapters, Dub & Captio
   - **`Bottom` / `Top`** position selector for burned-in captions, so they don't cover a lower third.
   - **`Cap Text`** opens a non-modal drawer listing every caption — it stays open and live-highlights/auto-scrolls to the active line while you keep playing the video.
   - **`Cap Export`** loads or saves captions as `.srt` (for Premiere's Captions panel / File > Import), plain `.txt` transcript, or `.csv`.
+  - **Caption an audio-only file**: drag a bare `.wav`, `.mp3`, `.m4a`, `.aac`, or `.flac` onto the main window (no video needed). It's wrapped in a throwaway black-frame video behind the scenes so the normal player, `Captions AI`, and `Cap Export` all work on it unchanged — there's nothing to look at, just the transcript.
 
 ---
 
@@ -84,6 +85,9 @@ Located in **Tab 2 (`📸 Still Frame Capture (Single, Batch, Interval & Scene)`
 - **Interval**: Extract a frame every `N` seconds within `[Trim In → Trim Out]` (for the current video or all videos in a folder).
 - **Scene**: Auto-detect scene cuts within `[Trim In → Trim Out]` and capture the midpoint frame of each scene.
 - **Organized `<video_stem>_frames/` Output**: All still captures are automatically saved inside `<output_folder>/<video_stem>_frames/` (matching `<output_folder>/<video_stem>_segments/` for split video clips), and **Contact Sheet PDF** generation reads from your output folder and `*_frames/` subfolders automatically.
+- **Contact Sheet frame order**: frames are sorted naturally by their timestamp (`…_12.0s` before `…_102.0s`), not as plain text, so a folder of captured frames lays out in the order they actually occur.
+- **Contact Sheet picture boxes**: each cell's border hugs the actual picture (no blank band above/below a wide video frame sitting in a near-square cell), and the grid itself is scored against the pictures' own aspect ratio, not forced square.
+- **Contact Sheet page guide**: the preview panel behind the page is a dark neutral color, so the white page's actual edge is visible instead of blending into a white-on-white background.
 
 ---
 

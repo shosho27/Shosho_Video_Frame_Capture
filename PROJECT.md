@@ -37,12 +37,14 @@
 - Offline Whisper AI speech-to-text transcription (`💬 Captions AI`) using bundled `faster-whisper` (`tiny`). Transcription-only, no speaker diarization.
 - `Burn into video/preview` toggle (captions as data-only vs. rendered), Bottom/Top burn position, non-modal live-highlighting `Cap Text` drawer, `Cap Export` for `.srt` / `.txt` / `.csv`.
 - `faster-whisper` needs `av==16.0.0` pinned in `requirements.txt` — newer `av` removed a kwarg faster-whisper's audio decoder calls, breaking every transcription with a `TypeError`.
+- Dropping a bare audio file (`.wav`/`.mp3`/`.m4a`/`.aac`/`.flac`) onto the main window now works (2026-10-30): `_load_audio_as_video` wraps it in a throwaway black-frame `.mp4` via FFmpeg (`tempfile.mkdtemp`, 640×360 @ 5fps, `-shortest`) so the existing video pipeline — player, `Captions AI`, `Cap Export` — captions it with no separate audio-only code path. Requires FFmpeg (same dependency Scene Detection already needs).
 
 ### Still Frame Capture Modes & Organized Subfolders
 **Status:** Done
 - Single, Batch, Interval, and Scene capture modes laid out in a clean 4-card horizontal tab.
 - Saves captured still images into an organized `<output_folder>/<video_stem>_frames/` subfolder (matching `<video_stem>_segments/`).
 - Contact Sheet PDF generator automatically discovers images in the output folder and `*_frames/` subfolders.
+- Contact Sheet fixes (2026-10-30): frame list now sorts in natural/numeric order (`list_contact_images` was comparing file names as plain text, so `_102.0s` sorted before `_12.0s`); each cell's border now hugs the fitted picture instead of a full cell-height box (was leaving a visible blank band — first bottom-anchored only, then still visible even centered); the on-screen preview panel is now a dark neutral color behind the white page so the paper's actual edge is visible instead of blending into a white background.
 
 ### Video Import, Link Downloader & Self-Contained macOS App
 **Status:** Done

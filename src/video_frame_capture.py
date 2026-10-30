@@ -104,6 +104,7 @@ BUILD_LABEL_SHORT = _short_build_label(BUILD_LABEL)
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.wmv', '.flv',
                     '.webm', '.m4v', '.mpg', '.mpeg')
 CONTACT_IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff'}
+AUDIO_EXTENSIONS = ('.wav', '.mp3', '.m4a', '.aac', '.flac')
 # Width, height in PDF points (1/72 inch), portrait.
 PAPER_SIZES_PT = {
     "Letter": (612.0, 792.0),
@@ -122,26 +123,37 @@ def page_points(name, landscape):
     return width, height
 
 
-def contact_grid(per_page, page_w, page_h):
+def contact_grid(per_page, page_w, page_h, target_aspect=1.0):
     """Choose columns and rows for `per_page` cells on a page of this size.
 
-    A perfect rectangle is preferred, and the cell stays close to square so
-    the picture and its two caption lines both fit.
+    The grid is scored against `target_aspect` (the pictures' own width /
+    height), so cells come out shaped like the pictures instead of always
+    square — square cells leave blank space above and below a wide video
+    frame. A perfect rectangle (no leftover empty cells) is still preferred.
     """
     per_page = max(1, int(per_page))
+    target_aspect = target_aspect if target_aspect and target_aspect > 0 else 1.0
     best = None
     for cols in range(1, per_page + 1):
         rows = math.ceil(per_page / cols)
         aspect = (page_w / cols) / (page_h / rows)
         waste = cols * rows - per_page
-        score = (abs(aspect - 1.0) + waste * 0.15, cols)
+        score = (abs(aspect - target_aspect) + waste * 0.15, cols)
         if best is None or score < best[0]:
             best = (score, cols, rows)
     return best[1], best[2]
 
 
+def _natural_sort_key(name):
+    """Split a file name into text/number chunks so '12' sorts before '102'."""
+    return [
+        int(chunk) if chunk.isdigit() else chunk.casefold()
+        for chunk in re.split(r"(\d+)", name)
+    ]
+
+
 def list_contact_images(folder):
-    """Image files in one folder (or its *_frames subfolders), sorted by file name."""
+    """Image files in one folder (or its *_frames subfolders), sorted by file name (natural order)."""
     if not folder or not os.path.isdir(folder):
         return []
     found = []
@@ -157,7 +169,7 @@ def list_contact_images(folder):
                     if os.path.isfile(sub_path):
                         sub_found.append(sub_path)
     result = found if found else sub_found
-    result.sort(key=lambda path: os.path.basename(path).casefold())
+    result.sort(key=lambda path: _natural_sort_key(os.path.basename(path)))
     return result
 
 
@@ -321,7 +333,13 @@ def paint_contact_page(painter, page_w, page_h, paths, per_page, page_label="", 
     gap = 8.0 * scale
     inner_w = page_w - margin * 2
     inner_h = page_h - margin - (margin + footer)
-    cols, rows = contact_grid(per_page, inner_w, inner_h)
+    sample_image = _contact_picture(paths[0])[0] if paths else QImage()
+    target_aspect = (
+        sample_image.width() / sample_image.height()
+        if not sample_image.isNull() and sample_image.height() > 0
+        else 1.0
+    )
+    cols, rows = contact_grid(per_page, inner_w, inner_h, target_aspect)
     cell_w = (inner_w - gap * (cols - 1)) / cols
     cell_h = (inner_h - gap * (rows - 1)) / rows
     caption_h = min(30.0 * scale, max(14.0 * scale, cell_h * 0.30))
@@ -337,10 +355,10 @@ def paint_contact_page(painter, page_w, page_h, paths, per_page, page_label="", 
         x = margin + col * (cell_w + gap)
         y = margin + row * (cell_h + gap)
         image_rect = QRectF(x, y, cell_w, max(1.0, cell_h - caption_h))
-        painter.setPen(QPen(QColor("#d0d0d0"), max(1.0, scale)))
-        painter.drawRect(image_rect)
         image, name, directory = _contact_picture(path)
+        painter.setPen(QPen(QColor("#d0d0d0"), max(1.0, scale)))
         if image.isNull():
+            painter.drawRect(image_rect)
             painter.setPen(QColor("#888"))
             painter.drawText(image_rect, Qt.AlignCenter, "Unreadable")
         else:
@@ -350,9 +368,14 @@ def paint_contact_page(painter, page_w, page_h, paths, per_page, page_label="", 
             fitted_w, fitted_h = _contain_size(
                 image.width(), image.height(), image_rect.width(), image_rect.height())
             dx = image_rect.x() + (image_rect.width() - fitted_w) / 2.0
-            dy = image_rect.bottom() - fitted_h
+            dy = image_rect.y() + (image_rect.height() - fitted_h) / 2.0
+            fitted_rect = QRectF(dx, dy, fitted_w, fitted_h)
+            # The border hugs the picture itself, not the full cell — a wide
+            # video frame in a near-square cell otherwise sits inside a box
+            # with a visibly empty white band above and below it.
+            painter.drawRect(fitted_rect)
             painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-            painter.drawImage(QRectF(dx, dy, fitted_w, fitted_h), image)
+            painter.drawImage(fitted_rect, image)
         name_rect = QRectF(x, y + cell_h - caption_h + 1, cell_w, caption_h / 2)
         dir_rect = QRectF(x, name_rect.bottom(), cell_w, caption_h / 2)
         painter.setFont(name_font)
@@ -483,7 +506,7 @@ class ContactSheetDialog(QDialog):
         self.preview.setMinimumHeight(420)
         self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.preview.setStyleSheet(
-            "background: white; color: #666; border: 1px solid #555570; border-radius: 4px;")
+            "background: #3a3a46; color: #999; border: 1px solid #555570; border-radius: 4px;")
         layout.addWidget(self.preview, stretch=1)
 
         actions = QHBoxLayout()
@@ -2104,6 +2127,59 @@ class VideoFrameCapture(QMainWindow):
 
         self.status_label.setText(
             f"{len(self.video_files)} video(s) found  ·  output → {self.output_folder}")
+
+    def _load_audio_as_video(self, audio_path):
+        """Wrap a dropped audio-only file in a throwaway black-frame video so the
+        existing video pipeline (player, Auto Caption, Cap Export) can caption it
+        without needing its own audio-only code path."""
+        ffmpeg = _find_ffmpeg()
+        if not ffmpeg:
+            QMessageBox.warning(
+                self, APP_NAME,
+                "FFmpeg was not found, so this audio file can't be prepared for captioning.")
+            return
+
+        stem = os.path.splitext(os.path.basename(audio_path))[0]
+        work_dir = tempfile.mkdtemp(prefix="vfc_audio_")
+        synthetic_path = os.path.join(work_dir, f"{stem}.mp4")
+
+        self.status_label.setText(f"Preparing “{os.path.basename(audio_path)}” for captioning…")
+        QApplication.processEvents()
+        cmd = [
+            ffmpeg, "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=640x360:r=5",
+            "-i", audio_path,
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            synthetic_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.isfile(synthetic_path):
+            detail = (result.stderr or "")[-600:]
+            QMessageBox.warning(
+                self, APP_NAME,
+                f"Could not prepare “{os.path.basename(audio_path)}” for captioning.\n\n{detail}")
+            return
+
+        self.video_folder = os.path.dirname(audio_path)
+        self.folder_label.setText(self.video_folder)
+        self.video_files = []
+        self.video_info = {}
+        self.file_list.clear()
+        item = QListWidgetItem(f"🎙 {os.path.basename(audio_path)}  (audio — captioning only)")
+        item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+        self.file_list.addItem(item)
+
+        if not self.output_folder:
+            self._set_output_folder(os.path.join(self.video_folder, "captured_frames"))
+        os.makedirs(self.output_folder, exist_ok=True)
+
+        self.load_video(synthetic_path)
+        self.status_label.setText(
+            f"🎙 Loaded “{os.path.basename(audio_path)}” for captioning — "
+            "there's no picture, just the audio. Use Auto Caption, then Cap Export to save the .srt."
+        )
 
     def _probe_video(self, path):
         cap = cv2.VideoCapture(path)
@@ -3788,6 +3864,9 @@ class VideoFrameCapture(QMainWindow):
                 if self.file_list.item(i).text().startswith(name):
                     self.file_list.setCurrentRow(i)
                     break
+        elif os.path.isfile(path) and \
+                os.path.splitext(path)[1].lower() in AUDIO_EXTENSIONS:
+            self._load_audio_as_video(path)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

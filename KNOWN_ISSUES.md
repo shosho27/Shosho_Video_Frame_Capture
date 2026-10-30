@@ -52,6 +52,14 @@ with this build. YouTube was not retried after that lookup was added.
 `build_app.py` is the build that puts Deno inside the app, and that bundle has
 not been rebuilt for this round.
 
+## Audio-only captioning needs FFmpeg, and its working file is temporary
+
+Dropping a bare audio file wraps it in a throwaway black-frame `.mp4` under
+the system temp directory (`tempfile.mkdtemp`) so the normal video pipeline
+can caption it. That wrapper file is not reloaded on relaunch — close and
+re-drop the audio file in a new session rather than expecting it in the
+recent-files list. Requires FFmpeg, same as Scene Detection.
+
 ## An open window keeps the previous build
 
 Replacing `dist/` or `~/Apps` does not change an app that is already running.
