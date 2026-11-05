@@ -150,6 +150,10 @@ def download_command(url, folder, height=None, browser=None, ffmpeg=None, mp3_bi
     for runtime in ('deno', 'node'):
         bundled = os.path.join(getattr(sys, '_MEIPASS', ''), 'bin', runtime)
         path = bundled if os.path.isfile(bundled) else shutil.which(runtime)
+        # Finder-launched apps get a minimal PATH without Homebrew.
+        if not path:
+            path = next((p for p in (f'/opt/homebrew/bin/{runtime}', f'/usr/local/bin/{runtime}')
+                         if os.access(p, os.X_OK)), None)
         if path:
             command += ['--js-runtimes', f'{runtime}:{path}']
             break
