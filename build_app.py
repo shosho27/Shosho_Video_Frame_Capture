@@ -9,6 +9,20 @@ import sys
 ROOT = Path(__file__).resolve().parent
 
 
+def write_build_stamp():
+    """Bake the build date and commit into src/_build_stamp.py for the window title."""
+    from datetime import datetime
+
+    def git(*args):
+        result = subprocess.run(['git', *args], cwd=ROOT, capture_output=True, text=True)
+        return result.stdout.strip() if result.returncode == 0 else ''
+
+    commit = git('rev-parse', '--short', 'HEAD')
+    dirty = '+dirty' if git('status', '--porcelain', '--untracked-files=no') else ''
+    label = f"built {datetime.now():%Y-%m-%d %H:%M}" + (f" · {commit}{dirty}" if commit else '')
+    (ROOT / 'src/_build_stamp.py').write_text(f'BUILD_LABEL = {label!r}\n', encoding='utf-8')
+
+
 def main():
     if sys.platform != 'darwin':
         raise SystemExit('Build this macOS application on a Mac.')
@@ -38,6 +52,7 @@ def main():
         '--add-data', f'{ROOT / "THIRD_PARTY_NOTICES.md"}:.',
         str(ROOT / 'src/app_main.py'),
     ]
+    write_build_stamp()
     for folder in (ROOT / 'dist', ROOT / 'build'):
         for _ in range(3):
             if folder.exists():
